@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Portable runtime & vendored third-party tools — fetched by bootstrap.
+# These are large (python ~67MB, tools ~13MB) and are NOT part of the source.
+# ─────────────────────────────────────────────────────────────────────────
+/python/
+/tools/
+
+# ─────────────────────────────────────────────────────────────────────────
+# Runtime state — created on first run. MUST NEVER be published: the SQLite
+# DB holds your real scan history, data/requests/ stores the raw HTTP requests
+# you tested (cookies, Authorization headers, session tokens), data/logs/ holds
+# engine output, and settings.json may hold host/port/toggles.
+# ─────────────────────────────────────────────────────────────────────────
+/data/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# ── Editor / OS ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

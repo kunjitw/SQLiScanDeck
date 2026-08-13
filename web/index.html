@@ -1,0 +1,291 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sqlmap_auto</title>
+<meta name="theme-color" content="#000000">
+<link rel="stylesheet" href="/style.css">
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem("theme");
+      if (t) document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+    document.documentElement.classList.add("js");
+  })();
+</script>
+
+<header class="glass" id="appHeader">
+  <div class="brand">sqlmap_auto</div>
+  <div class="header-mid">
+    <span class="mono-label">專案</span>
+    <span class="current-project" id="currentProject" title="目前專案">—</span>
+    <button class="btn ghost sm" id="projectsBtn" title="切換 / 建立 / 刪除專案">☰ 專案總覽</button>
+  </div>
+  <div class="header-right">
+    <button class="icon-btn" id="toggleLeftBtn" title="收合/展開 左側佇列">◧</button>
+    <button class="icon-btn" id="toggleRightBtn" title="收合/展開 右側紀錄樹">◨</button>
+    <div class="ip-cluster">
+      <div class="ip-cell" title="對外 / 公網 IP"><span class="mono-label">對外</span><span id="ipPublic" class="ip-value">…</span></div>
+      <div class="ip-cell" title="內網 / 本機 IP"><span class="mono-label">內網</span><span id="ipLocal" class="ip-value">…</span></div>
+      <button class="icon-btn sm" id="ipRefreshBtn" title="立即更新 IP">↻</button>
+      <span class="ip-countdown" id="ipCountdown" title="下次自動更新倒數">—</span>
+    </div>
+    <span class="health-dot" id="healthDot" title="sqlmap 引擎狀態"></span>
+    <button class="icon-btn" id="settingsBtn" title="設定">⚙</button>
+    <button class="icon-btn" id="themeBtn" title="切換深/淺色">◐</button>
+  </div>
+</header>
+
+<div class="app-body">
+  <!-- ===== LEFT SIDEBAR ===== -->
+  <aside class="sidebar" id="scanSidebar">
+    <div class="sidebar-head">
+      <span class="sidebar-title">掃描佇列 / 紀錄</span>
+      <div class="sidebar-tools">
+        <select id="statusFilter" class="select sm">
+          <option value="">全部</option>
+          <option value="running">執行中</option>
+          <option value="queued">佇列中</option>
+          <option value="done">完成</option>
+          <option value="error">錯誤</option>
+          <option value="killed">已中止</option>
+        </select>
+        <button class="btn ghost sm danger-btn" id="stopAllBtn" title="強制停止所有執行中/佇列中的掃描">全部停止</button>
+        <button class="icon-btn sm" id="refreshBtn" title="重新整理">↻</button>
+      </div>
+    </div>
+    <div id="scanBoard" class="board"></div>
+    <div id="boardEmpty" class="empty">此專案尚無掃描紀錄。<br>右側貼一個請求開始吧。</div>
+  </aside>
+  <div class="resizer" id="resizerLeft" title="拖曳調整左側寬度"></div>
+
+  <!-- ===== DASHBOARD ===== -->
+  <main class="main-col" id="dashboardView">
+    <section class="panel" id="requestCard">
+      <div class="section-head"><span class="bar"></span>1 · 貼上請求</div>
+      <textarea id="rawInput" class="raw" spellcheck="false"
+        placeholder="貼上原始 HTTP 請求(Burp 格式),或直接貼一個 URL,例如:&#10;&#10;POST /api/login HTTP/1.1&#10;Host: target.example.com&#10;Content-Type: application/json&#10;Cookie: _ga=GA1.2.123; sessionid=abcd&#10;&#10;{&quot;username&quot;:&quot;admin&quot;,&quot;password&quot;:&quot;x&quot;}"></textarea>
+      <div class="composer-actions">
+        <button class="btn primary" id="parseBtn">解析請求</button>
+        <button class="btn ghost" id="pasteBtn" title="貼上剪貼簿內容">📋 貼上剪貼簿</button>
+        <span id="parseWarn" class="warn-text"></span>
+      </div>
+    </section>
+
+    <section class="panel hidden" id="resultCard">
+      <div class="section-head"><span class="bar"></span>2 · 解析結果</div>
+      <div id="parseSummary" class="kv-grid"></div>
+      <div class="subhead">
+        偵測到的參數
+        <span class="tiny-actions">
+          <button class="link-btn" data-sel="all">全選</button>
+          <button class="link-btn" data-sel="none">全不選</button>
+          <button class="link-btn" data-sel="suggest">套用過濾建議</button>
+        </span>
+      </div>
+      <div class="table-scroll">
+        <table class="params" id="paramsTable">
+          <thead><tr><th></th><th>參數</th><th>位置</th><th>樣本值</th><th>過濾</th><th>過去測試</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="headerParams" class="skip-section"></div>
+      <div id="skipParams" class="skip-section"></div>
+    </section>
+
+    <section class="panel hidden" id="optionsCard">
+      <div class="section-head"><span class="bar"></span>3 · 工具與掃描選項</div>
+      <div class="tool-choice">
+        <span class="mono-label">工具(二選一)</span>
+        <label class="tool-radio"><input type="radio" name="tool" value="sqlmap"><span class="tr-body"><b>sqlmap</b><small>功能最全 · REST API 併發</small></span></label>
+        <label class="tool-radio"><input type="radio" name="tool" value="ghauri"><span class="tr-body"><b>ghauri</b><small>更快 · 某些 WAF 更佳</small></span></label>
+      </div>
+
+      <div id="toolOptions" class="hidden">
+        <div class="template-bar">
+          <span class="mono-label">套用範本</span>
+          <select id="templateSelect" class="select sm"><option value="">（不套用範本）</option></select>
+          <button class="btn ghost sm" id="applyTplBtn">套用</button>
+          <span class="tpl-hint" id="tplHint"></span>
+          <button class="link-btn" id="editTplLink" style="margin-left:auto">前往範本設定 →</button>
+        </div>
+
+        <div class="subhead" id="optToolLabel">選項</div>
+        <div class="opts-grid" id="optGrid"></div>
+        <div class="opts-toggles" id="optToggles"></div>
+
+        <div class="composer-actions end">
+          <button class="btn primary" id="launchBtn">開始掃描（不阻塞,可繼續丟下一個）</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== PROJECTS ENTRY ===== -->
+  <main class="main-col settings-wrap hidden" id="projectsView">
+    <div class="settings-head">
+      <button class="btn ghost sm" id="projectsBackBtn">← 返回儀表板</button>
+      <h2>專案總覽</h2>
+      <button class="btn primary sm" id="openNewProjectBtn">＋ 建立新專案</button>
+    </div>
+    <section class="panel">
+      <div class="section-head"><span class="bar"></span>所有專案</div>
+      <div id="projectsList" class="project-cards"></div>
+    </section>
+  </main>
+
+  <!-- ===== SETTINGS ===== -->
+  <main class="main-col settings-wrap hidden" id="settingsView">
+    <div class="settings-head">
+      <button class="btn ghost sm" id="settingsBackBtn">← 返回儀表板</button>
+      <h2>設定</h2>
+    </div>
+
+    <div class="tabbar" id="settingsTabs">
+      <button class="tab active" data-tab="general">一般</button>
+      <button class="tab" data-tab="rules">過濾規則</button>
+      <button class="tab" data-tab="templates">掃描範本</button>
+      <button class="tab" data-tab="project">本專案</button>
+    </div>
+
+    <section class="tabpanel panel" id="tab-general">
+      <div class="section-head"><span class="bar"></span>一般設定</div>
+      <div class="opts-grid">
+        <label class="field"><span>同時併發掃描數(改後需重啟)</span><input id="setMax" type="number" min="1" max="32"></label>
+        <label class="field"><span>Web 埠(改後需重啟)</span><input id="setPort" type="number"></label>
+        <label class="field"><span>IP 自動刷新(秒)</span><input id="setIpRefresh" type="number" min="5" max="3600"></label>
+      </div>
+      <div class="opts-toggles">
+        <label class="check"><input type="checkbox" id="setPublicIp"> 嘗試顯示公網 IP(內網失敗自動略過)</label>
+        <label class="check"><input type="checkbox" id="setAutoOpen"> 啟動時自動開瀏覽器</label>
+      </div>
+      <div class="composer-actions end"><button class="btn primary" id="setSave">儲存一般設定</button></div>
+    </section>
+
+    <section class="tabpanel panel hidden" id="tab-rules">
+      <div class="section-head"><span class="bar"></span>過濾規則</div>
+      <p class="panel-note"><b>全域</b>規則對所有專案生效;<b>本專案</b>規則只對目前專案生效。命中的參數會自動不勾選(仍可手動測回)。</p>
+      <div class="subtabbar" id="ruleScopeTabs">
+        <button class="subtab active" data-scope="global">全域規則</button>
+        <button class="subtab" data-scope="project">本專案規則</button>
+      </div>
+      <div class="rules-add">
+        <select id="rKind"><option value="name">依名稱</option><option value="value">依值</option></select>
+        <select id="rMode">
+          <option value="prefix">開頭是</option><option value="contains">包含</option>
+          <option value="equals">等於</option><option value="iequals">等於(不分大小寫)</option>
+          <option value="regex">正規表達式</option>
+        </select>
+        <input id="rPattern" placeholder="例:_ga(值以 _ga 開頭)">
+        <input id="rNote" placeholder="備註(可空)">
+        <button class="btn sm" id="rAdd">新增到全域</button>
+      </div>
+      <div class="table-scroll">
+        <table class="rules-table" id="rulesTable">
+          <thead><tr><th>啟用</th><th>類型</th><th>模式</th><th>樣式</th><th>備註</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Template editor: SAME options component as the scan composer -->
+    <section class="tabpanel panel hidden" id="tab-templates">
+      <div class="section-head"><span class="bar"></span>掃描範本設定</div>
+      <p class="panel-note">範本就是一組「掃描選項」,依工具分開。<b>每個工具各有自己的預設範本</b>,設為預設後掃描時自動套用。</p>
+      <div class="subtabbar" id="tplToolTabs">
+        <button class="subtab active" data-tpltool="sqlmap">sqlmap</button>
+        <button class="subtab" data-tpltool="ghauri">ghauri</button>
+      </div>
+      <div class="tpl-editor">
+        <div class="tpl-list" id="tplList">
+          <button class="btn sm" id="teNewBtn">＋ 新範本</button>
+          <div id="tplListBox" class="tpl-list-box"></div>
+        </div>
+        <div class="tpl-resizer" id="tplResizer" title="拖曳調整清單寬度"></div>
+        <div class="tpl-empty" id="tplEmpty">← 從左側挑一個範本來編輯,或按「＋ 新範本」建立。<br>右側編輯區會在你選擇後才出現。</div>
+        <div class="tpl-form hidden" id="tplForm">
+          <label class="field wide"><span>範本名稱</span><input id="teName" placeholder="例:MySQL 深掃 level5"></label>
+          <div class="tool-choice compact">
+            <span class="mono-label">工具</span>
+            <label class="tool-radio sm"><input type="radio" name="teTool" value="sqlmap"><span class="tr-body"><b>sqlmap</b></span></label>
+            <label class="tool-radio sm"><input type="radio" name="teTool" value="ghauri"><span class="tr-body"><b>ghauri</b></span></label>
+          </div>
+          <div class="subhead" id="teToolLabel">選項</div>
+          <div class="opts-grid" id="teOptGrid"></div>
+          <div class="opts-toggles" id="teOptToggles"></div>
+          <label class="check"><input type="checkbox" id="teDefault"> 設為此工具的預設(每次自動套用)</label>
+          <div class="composer-actions end">
+            <button class="btn ghost sm" id="teDelete">刪除</button>
+            <button class="btn primary sm" id="teSave">儲存範本</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Current project only -->
+    <section class="tabpanel panel hidden" id="tab-project">
+      <div class="section-head"><span class="bar"></span>本專案資訊</div>
+      <p class="panel-note">此頁只編輯「目前專案」的資料。要建立/切換/刪除其他專案,請用上方「☰ 專案總覽」。</p>
+      <label class="field wide"><span>名稱</span><input id="cpName"></label>
+      <label class="field wide"><span>備註</span><input id="cpNote"></label>
+      <label class="field wide"><span>允許測試來源 IP(備忘)</span><input id="cpIp"></label>
+      <div class="composer-actions end"><button class="btn primary" id="cpSave">儲存本專案</button></div>
+    </section>
+  </main>
+
+  <!-- ===== RIGHT: test-record tree ===== -->
+  <div class="resizer" id="resizerRight" title="拖曳調整右側寬度"></div>
+  <aside class="tree-panel" id="treePanel">
+    <div class="sidebar-head">
+      <span class="sidebar-title">測試紀錄樹</span>
+      <div class="sidebar-tools">
+        <button class="link-btn" id="treeExpandAll">全展開</button>
+        <button class="link-btn" id="treeCollapseAll">全收合</button>
+      </div>
+    </div>
+    <div id="treeBox" class="tree-box"></div>
+    <div id="treeEmpty" class="empty small">尚無測試紀錄。</div>
+  </aside>
+</div>
+
+<!-- ================= Modals ================= -->
+<div class="modal-backdrop hidden" id="modalBackdrop"></div>
+
+<div class="modal wide-modal hidden" id="scanDetailModal">
+  <div class="modal-head">
+    <span id="sdTitle">掃描詳情</span>
+    <span class="modal-sub" id="sdMeta"></span>
+  </div>
+  <div id="sdFindings" class="findings"></div>
+  <div class="scan-actions" id="sdActions"></div>
+  <div class="log-view" id="sdLog"></div>
+  <div class="modal-actions">
+    <button class="btn ghost sm danger-btn" id="sdDelete">刪除此掃描紀錄</button>
+    <button class="btn ghost" data-close>關閉</button>
+  </div>
+</div>
+
+<!-- create-project dialog (opened from 專案總覽 → ＋ 建立新專案) -->
+<div class="modal hidden" id="newProjectModal">
+  <div class="modal-head"><span>建立新專案</span></div>
+  <label class="field wide"><span>專案名稱</span><input id="npName" placeholder="例:客戶A 滲透測試 2026Q3"></label>
+  <label class="field wide"><span>備註</span><input id="npNote" placeholder="可空"></label>
+  <label class="field wide"><span>允許測試來源 IP(備忘)</span><input id="npIp" placeholder="可空"></label>
+  <div class="modal-actions">
+    <button class="btn ghost" data-close>取消</button>
+    <button class="btn primary" id="npCreate">建立並進入</button>
+  </div>
+</div>
+
+<!-- reusable confirm dialog (replaces window.confirm for every destructive action) -->
+<div class="modal confirm-modal hidden" id="confirmModal">
+  <div class="modal-head"><span id="confirmTitle">請確認</span></div>
+  <div class="confirm-body" id="confirmBody"></div>
+  <div class="modal-actions">
+    <button class="btn ghost" id="confirmCancel">取消</button>
+    <button class="btn danger-btn" id="confirmOk">確定</button>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js" defer></script>

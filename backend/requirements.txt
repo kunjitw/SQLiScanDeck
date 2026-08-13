@@ -1,0 +1,8 @@
+# Backend deps installed into the PORTABLE python by bootstrap.ps1 (never the
+# system python). Plain uvicorn (pure-python asyncio loop) so no C compiler is
+# needed on the embeddable interpreter.
+#
+# NOTE: ghauri is NOT on PyPI -- bootstrap.ps1 installs it from its GitHub
+# source zip (no git required). Do not add "ghauri" here.
+fastapi
+uvicorn
