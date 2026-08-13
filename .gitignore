@@ -21,6 +21,14 @@ __pycache__/
 venv/
 .env
 
+# ── Archives / backups (never commit a zip of the project) ──
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
 # ── Editor / OS ──
 .vscode/
 .idea/
