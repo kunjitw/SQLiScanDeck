@@ -131,7 +131,11 @@ class ScanContext:
             ended_at=ended,
             duration_ms=ended - started,
         )
-        self._record_param_history(vulnerable, findings)
+        # Only a genuine completion tells us anything about the params. A killed
+        # / stopped / error scan must NOT record them as "clean" -- that would
+        # poison the "have I tested this before?" dedup with false negatives.
+        if status == "done":
+            self._record_param_history(vulnerable, findings)
 
     def _record_param_history(self, vulnerable, findings):
         vuln_names = _vuln_param_names(findings) if vulnerable else set()
@@ -154,7 +158,14 @@ class ScanContext:
 class ScanManager:
     def __init__(self):
         self.settings = config.load_settings()
-        self.pool = ThreadPoolExecutor(max_workers=self.settings["max_concurrent"])
+        # clamp to a sane positive int so a bad settings.json (0 / negative /
+        # non-int) can't crash the whole backend at import time.
+        try:
+            workers = int(self.settings.get("max_concurrent", 8))
+        except (TypeError, ValueError):
+            workers = 8
+        workers = max(1, min(64, workers))
+        self.pool = ThreadPoolExecutor(max_workers=workers)
         self.contexts = {}          # scan_id -> ScanContext
         self._ctx_lock = threading.Lock()
         self._api_proc = None
@@ -167,8 +178,16 @@ class ScanManager:
         # sqlmap API is started lazily on first sqlmap scan (see ensure_sqlmapapi)
 
     def shutdown(self):
+        # stop the flag AND actually kill any live ghauri/sqlmap engine process,
+        # so Ctrl+C never orphans a scanner still hitting the target.
         for ctx in list(self.contexts.values()):
             ctx.request_stop()
+            proc = getattr(ctx, "engine_proc", None)
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
         if self._api_proc and self._api_proc.poll() is None:
             try:
                 self._api_proc.terminate()
@@ -194,13 +213,23 @@ class ScanManager:
                 return True
             if not os.path.isfile(config.SQLMAPAPI_PY):
                 return False
-            cmd = [config.PYTHON_EXE, config.SQLMAPAPI_PY, "-s",
+            # go through the launcher so SQLMAP_DIR is on sys.path (embeddable
+            # python's ._pth won't add it -> sqlmapapi.py can't `import lib`)
+            cmd = [config.PYTHON_EXE, config.SQLMAPAPI_LAUNCH, "-s",
                    "-H", self.settings["sqlmapapi_host"],
                    "-p", str(self.settings["sqlmapapi_port"])]
+            # keep the API's output in a log so a startup failure stays visible
+            # (it used to go to DEVNULL, which hid exactly this kind of crash)
+            try:
+                config.ensure_dirs()
+                logf = open(os.path.join(config.LOG_DIR, "sqlmapapi.log"),
+                            "a", encoding="utf-8", errors="ignore")
+            except Exception:
+                logf = subprocess.DEVNULL
             try:
                 self._api_proc = subprocess.Popen(
                     cmd, cwd=config.SQLMAP_DIR,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    stdout=logf, stderr=subprocess.STDOUT)
             except Exception:
                 return False
             # wait up to ~10s for it to come up
@@ -354,21 +383,27 @@ class ScanManager:
             return None
         path = os.path.join(config.LOG_DIR, "scan_{}.log".format(scan_id))
         text = ""
-        size = 0
+        new_offset = max(int(offset or 0), 0)
         try:
             if os.path.isfile(path):
                 size = os.path.getsize(path)
+                start = min(new_offset, size)
                 # binary seek so a UTF-8 multibyte char is never split mid-way
                 with open(path, "rb") as f:
-                    f.seek(min(max(offset, 0), size))
-                    text = f.read().decode("utf-8", "ignore")
+                    f.seek(start)
+                    raw = f.read()               # may read past `size` if it grew
+                text = raw.decode("utf-8", "ignore")
+                # report the ACTUAL end of what we returned, not the pre-read
+                # size -- otherwise bytes appended between getsize() and read()
+                # get re-sent next poll and the live log shows duplicate lines.
+                new_offset = start + len(raw)
         except Exception:
             pass
         return {
             "id": scan_id,
             "status": row["status"],
             "vulnerable": bool(row["vulnerable"]),
-            "offset": size,
+            "offset": new_offset,
             "chunk": text,
             "duration_ms": row["duration_ms"],
             "result": json.loads(row["result_json"]) if row["result_json"] else None,

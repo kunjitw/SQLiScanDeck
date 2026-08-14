@@ -22,56 +22,88 @@ const state = {
 };
 
 // ===== option schemas (keys = backend driver option names) ================
+// Defaults + ranges verified against vendored source:
+//   sqlmap-1.10/lib/core/defaults.py  &  ghauri-1.4.3/ghauri/scripts/ghauri.py
+// `def` = the tool's own default (shown to the user; leaving a field blank uses it).
+// type "slider" renders a range + a synced manual number box.
 const COMMON_TOGGLES = [
-  { key: "force_ssl", label: "強制 HTTPS" },
-  { key: "random_agent", label: "隨機 User-Agent" },
+  { key: "force_ssl", label: "強制 HTTPS", desc: "把請求都當 https 送(--force-ssl)。" },
+  { key: "random_agent", label: "隨機 User-Agent", desc: "每次用隨機瀏覽器 UA,降低被指紋辨識/擋下。" },
 ];
 const COMMON_FIELDS = [
-  { key: "proxy", label: "Proxy", type: "text", placeholder: "http://127.0.0.1:8080" },
-  { key: "restrict_ip", label: "限制來源 IP(備忘)", type: "text", placeholder: "留空=不限制" },
-  { key: "extra_flags", label: "額外參數(原樣傳給工具)", type: "text", wide: true, placeholder: "例:--prefix ) --suffix -- -" },
+  { key: "proxy", label: "Proxy", type: "text", placeholder: "http://127.0.0.1:8080",
+    desc: "把流量導到代理(常用來接 Burp 觀察 payload)。預設不使用。" },
+  { key: "restrict_ip", label: "限制來源 IP(備忘)", type: "text", placeholder: "留空=不限制",
+    desc: "僅作專案備忘用,記錄允許測試的來源 IP。" },
+  { key: "extra_flags", label: "額外參數(原樣傳給工具)", type: "text", wide: true, placeholder: "例:--prefix ) --suffix -- -",
+    desc: "任何上面沒有的旗標,原封不動接到指令後面(進階)。" },
 ];
-// sqlmap dests verified against sqlmap-1.10/lib/parse/cmdline.py
-// ghauri flags verified against ghauri-1.4.3/ghauri/scripts/ghauri.py (no --tamper/--risk)
 const SCHEMAS = {
   sqlmap: {
     fields: [
-      { key: "level", label: "Level", type: "select", options: [["", "預設(1)"], ["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"], ["5", "5"]] },
-      { key: "risk", label: "Risk", type: "select", options: [["", "預設(1)"], ["1", "1"], ["2", "2"], ["3", "3"]] },
-      { key: "technique", label: "Technique", type: "text", placeholder: "BEUSTQ(預設全部)" },
-      { key: "dbms", label: "DBMS", type: "text", placeholder: "mysql / mssql…" },
-      { key: "threads", label: "Threads", type: "number", min: 1, max: 20, placeholder: "1" },
-      { key: "tamper", label: "Tamper", type: "text", placeholder: "space2comment,between" },
-      { key: "timeout", label: "Timeout(秒)", type: "number", min: 1, placeholder: "30" },
-      { key: "time_sec", label: "Time-sec 延遲", type: "number", min: 1, placeholder: "5" },
-      { key: "delay", label: "Delay(秒)", type: "number", min: 0, placeholder: "0" },
-      { key: "retries", label: "Retries", type: "number", min: 0, placeholder: "3" },
-      { key: "prefix", label: "Prefix", type: "text" },
-      { key: "suffix", label: "Suffix", type: "text" },
+      { key: "level", label: "Level", type: "slider", min: 1, max: 5, def: 1,
+        desc: "測試深度:越高測越多注入點(含 Cookie、Header)與更多 payload,也越慢。" },
+      { key: "risk", label: "Risk", type: "slider", min: 1, max: 3, def: 1,
+        desc: "風險:越高用越激進的 payload(可能 OR-based、影響資料),也越容易被 WAF 擋。" },
+      { key: "technique", label: "Technique", type: "text", def: "BEUSTQ", placeholder: "BEUSTQ",
+        desc: "用哪些技術:B 布林盲注 · E 報錯 · U 聯合查詢 · S 堆疊查詢 · T 時間盲注 · Q 內聯。留空=全用。" },
+      { key: "threads", label: "Threads", type: "slider", min: 1, max: 10, def: 1,
+        desc: "併發 HTTP 請求數:越高越快,但越容易觸發防護或造成漏判。sqlmap 上限 10。" },
+      { key: "timeout", label: "Timeout", type: "slider", min: 5, max: 120, step: 5, def: 30,
+        desc: "單一連線的逾時秒數。" },
+      { key: "time_sec", label: "Time-sec", type: "slider", min: 1, max: 15, def: 5,
+        desc: "時間盲注時要求資料庫延遲的秒數。太短易誤判、太長變慢。" },
+      { key: "delay", label: "Delay", type: "slider", min: 0, max: 10, def: 0,
+        desc: "每個請求之間的延遲秒數,用來避開速率限制。" },
+      { key: "retries", label: "Retries", type: "slider", min: 0, max: 10, def: 3,
+        desc: "連線逾時時的重試次數。" },
+      { key: "dbms", label: "DBMS", type: "text", placeholder: "mysql / mssql…",
+        desc: "強制指定後端資料庫,跳過自動偵測。預設自動偵測。" },
+      { key: "tamper", label: "Tamper", type: "text", placeholder: "space2comment,between",
+        desc: "繞過 WAF 的 payload 變形腳本(可多個,逗號分隔)。預設不使用。" },
+      { key: "prefix", label: "Prefix", type: "text",
+        desc: "在 payload 前面加固定字串(用於特殊 injection context)。" },
+      { key: "suffix", label: "Suffix", type: "text",
+        desc: "在 payload 後面加固定字串。" },
     ],
     toggles: [
-      { key: "get_banner", label: "取 banner" }, { key: "get_current_user", label: "目前使用者" },
-      { key: "get_current_db", label: "目前資料庫" }, { key: "get_hostname", label: "主機名" },
-      { key: "get_dbs", label: "列舉 DB" }, { key: "is_dba", label: "是否 DBA" },
+      { key: "get_banner", label: "取 banner", desc: "抓資料庫版本橫幅(--banner)。" },
+      { key: "get_current_user", label: "目前使用者", desc: "抓目前 DB 連線使用者。" },
+      { key: "get_current_db", label: "目前資料庫", desc: "抓目前使用的資料庫名。" },
+      { key: "get_hostname", label: "主機名", desc: "抓 DB 伺服器主機名。" },
+      { key: "get_dbs", label: "列舉 DB", desc: "列出所有資料庫(較慢)。" },
+      { key: "is_dba", label: "是否 DBA", desc: "檢查目前使用者是否為資料庫管理員。" },
     ],
   },
   ghauri: {
     fields: [
-      { key: "level", label: "Level (1-3)", type: "select", options: [["", "預設(1)"], ["1", "1"], ["2", "2"], ["3", "3"]] },
-      { key: "technique", label: "Technique", type: "text", placeholder: "BEST(預設)" },
-      { key: "dbms", label: "DBMS", type: "text", placeholder: "mysql / mssql…" },
-      { key: "threads", label: "Threads", type: "number", min: 1, max: 20, placeholder: "1" },
-      { key: "timeout", label: "Timeout(秒)", type: "number", min: 1, placeholder: "30" },
-      { key: "time_sec", label: "Time-sec 延遲", type: "number", min: 1, placeholder: "5" },
-      { key: "delay", label: "Delay(秒)", type: "number", min: 0, placeholder: "0" },
-      { key: "retries", label: "Retries", type: "number", min: 0, placeholder: "3" },
-      { key: "prefix", label: "Prefix", type: "text" },
-      { key: "suffix", label: "Suffix", type: "text" },
+      { key: "level", label: "Level", type: "slider", min: 1, max: 3, def: 1,
+        desc: "測試深度:越高測越多注入點與 payload,也越慢(ghauri 為 1–3)。" },
+      { key: "technique", label: "Technique", type: "text", def: "BEST", placeholder: "BEST",
+        desc: "用哪些技術:B 布林盲注 · E 報錯 · S 堆疊查詢 · T 時間盲注。留空=BEST(全用)。" },
+      { key: "threads", label: "Threads", type: "slider", min: 1, max: 10, def: 1,
+        desc: "併發 HTTP 請求數:越高越快,但越容易觸發防護或漏判。" },
+      { key: "timeout", label: "Timeout", type: "slider", min: 5, max: 120, step: 5, def: 30,
+        desc: "單一連線的逾時秒數。" },
+      { key: "time_sec", label: "Time-sec", type: "slider", min: 1, max: 15, def: 5,
+        desc: "時間盲注時要求資料庫延遲的秒數。" },
+      { key: "delay", label: "Delay", type: "slider", min: 0, max: 10, def: 0,
+        desc: "每個請求之間的延遲秒數,用來避開速率限制。" },
+      { key: "retries", label: "Retries", type: "slider", min: 0, max: 10, def: 3,
+        desc: "連線逾時時的重試次數。" },
+      { key: "dbms", label: "DBMS", type: "text", placeholder: "mysql / mssql…",
+        desc: "強制指定後端資料庫,跳過自動偵測。預設自動偵測。" },
+      { key: "prefix", label: "Prefix", type: "text",
+        desc: "在 payload 前面加固定字串。" },
+      { key: "suffix", label: "Suffix", type: "text",
+        desc: "在 payload 後面加固定字串。" },
     ],
     toggles: [
-      { key: "get_banner", label: "取 banner" }, { key: "get_current_user", label: "目前使用者" },
-      { key: "get_current_db", label: "目前資料庫" }, { key: "get_hostname", label: "主機名" },
-      { key: "get_dbs", label: "列舉 DB" },
+      { key: "get_banner", label: "取 banner", desc: "抓資料庫版本橫幅(--banner)。" },
+      { key: "get_current_user", label: "目前使用者", desc: "抓目前 DB 連線使用者。" },
+      { key: "get_current_db", label: "目前資料庫", desc: "抓目前使用的資料庫名。" },
+      { key: "get_hostname", label: "主機名", desc: "抓 DB 伺服器主機名。" },
+      { key: "get_dbs", label: "列舉 DB", desc: "列出所有資料庫(較慢)。" },
     ],
   },
 };
@@ -91,22 +123,47 @@ function fmtTime(ms) { return ms ? new Date(ms).toLocaleString() : ""; }
 function fmtDur(ms) { if (!ms && ms !== 0) return ""; const s = Math.round(ms / 1000); return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + (s % 60) + "s"; }
 
 // ===== shared options renderer (composer + template editor) ===============
+function optHead(f) {
+  const def = f.def != null ? `<span class="opt-default">預設 ${esc(String(f.def))}</span>` : "";
+  return `<div class="opt-head"><span class="opt-label">${esc(f.label)}</span>${def}</div>`;
+}
+function optDesc(f) { return f.desc ? `<div class="opt-desc">${esc(f.desc)}</div>` : ""; }
 function renderFieldHtml(f) {
   const wide = f.wide ? " wide" : "";
+  if (f.type === "slider") {
+    const def = f.def != null ? f.def : f.min;
+    return `<div class="opt-row${wide}">${optHead(f)}
+      <div class="opt-control slider-control">
+        <input type="range" class="opt-slider" min="${f.min}" max="${f.max}" step="${f.step || 1}" data-def="${def}">
+        <input type="number" class="opt-num" data-optkey="${f.key}" min="${f.min}" max="${f.max}" step="${f.step || 1}" placeholder="${def}">
+      </div>${optDesc(f)}</div>`;
+  }
   if (f.type === "select") {
     const opts = f.options.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
-    return `<label class="field${wide}"><span>${esc(f.label)}</span><select data-optkey="${f.key}">${opts}</select></label>`;
+    return `<div class="opt-row${wide}">${optHead(f)}<div class="opt-control"><select data-optkey="${f.key}">${opts}</select></div>${optDesc(f)}</div>`;
   }
   const attrs = [f.min != null ? `min="${f.min}"` : "", f.max != null ? `max="${f.max}"` : "", f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ""].join(" ");
-  return `<label class="field${wide}"><span>${esc(f.label)}</span><input data-optkey="${f.key}" type="${f.type}" ${attrs}></label>`;
+  return `<div class="opt-row${wide}">${optHead(f)}<div class="opt-control"><input data-optkey="${f.key}" type="${f.type}" ${attrs}></div>${optDesc(f)}</div>`;
 }
-function renderToggleHtml(t) { return `<label class="check"><input type="checkbox" data-optkey="${t.key}"> ${esc(t.label)}</label>`; }
+function renderToggleHtml(t) { return `<label class="check" title="${esc(t.desc || "")}"><input type="checkbox" data-optkey="${t.key}"> ${esc(t.label)}</label>`; }
+// keep a range slider and its manual number box in sync (blank number = tool default)
+function wireSliders(gridSel) {
+  $$(`${gridSel} .slider-control`).forEach(sc => {
+    const range = sc.querySelector(".opt-slider"), num = sc.querySelector(".opt-num");
+    if (!range || !num) return;
+    const def = range.getAttribute("data-def");
+    range.oninput = () => { num.value = range.value; };
+    num.oninput = () => { range.value = (num.value.trim() === "" ? def : num.value); };
+    range.value = (num.value.trim() === "" ? def : num.value);   // initial sync
+  });
+}
 function renderOptions(tool, gridSel, togglesSel, labelSel) {
   const schema = SCHEMAS[tool]; if (!schema) return;
   const fields = schema.fields.concat(COMMON_FIELDS);
   const toggles = COMMON_TOGGLES.concat(schema.toggles);
   $(gridSel).innerHTML = fields.map(renderFieldHtml).join("");
   $(togglesSel).innerHTML = toggles.map(renderToggleHtml).join("");
+  wireSliders(gridSel);
   if (labelSel && $(labelSel)) $(labelSel).textContent = tool + " 選項";
 }
 function gatherOptions(gridSel, togglesSel) {
@@ -125,6 +182,7 @@ function applyOptions(o, gridSel, togglesSel) {
     if (el.type === "checkbox") el.checked = !!o[k];
     else el.value = (k in o && o[k] != null) ? o[k] : "";
   });
+  wireSliders(gridSel);   // re-sync slider positions after applying values
 }
 
 // ===== IP / health ========================================================
@@ -322,6 +380,7 @@ function wireParamRows(root) {
     state.params[i].selected = cb.checked;
     const tr = cb.closest("tr");
     if (tr) { tr.classList.toggle("sel", cb.checked); tr.classList.toggle("unsel", !cb.checked); }
+    updateCmdPreview();
   });
 }
 // A collapsible sub-region (Header params / auto-skipped) below the main table.
@@ -386,6 +445,7 @@ function selectParams(mode) {
     else if (mode === "suggest") p.selected = !p.filtered && p.location !== "HEADER";
   });
   renderParams();
+  updateCmdPreview();
 }
 
 // ===== composer tool + templates ==========================================
@@ -403,6 +463,7 @@ function selectTool(tool, opts) {
     const def = (state.templates || []).find(t => t.is_default && t.data && t.data.tool === tool);
     if (def) { applyOptions(def.data.options || {}, "#optGrid", "#optToggles"); $("#templateSelect").value = String(def.id); }
   }
+  updateCmdPreview();
 }
 function populateTemplateDropdown(tool) {
   const list = (state.templates || []).filter(t => t.data && t.data.tool === tool);
@@ -415,7 +476,45 @@ function applySelectedTemplate() {
   const t = (state.templates || []).find(x => x.id === id);
   if (!t) return;
   applyOptions(t.data.options || {}, "#optGrid", "#optToggles");
+  updateCmdPreview();
   toast(`已套用範本「${t.name}」`, "ok");
+}
+
+// ===== command preview (what will actually run) ===========================
+// Best-effort mirror of the drivers: for sqlmap it's the CLI EQUIVALENT of the
+// REST API options; for ghauri it's the real CLI. Purely for the user to see.
+function buildCmdPreview() {
+  if (!state.parsed) return "";
+  const tool = selectedTool();
+  if (!tool) return "";
+  const o = gatherOptions("#optGrid", "#optToggles");
+  const names = state.params || [];
+  const sel = [...new Set(names.filter(p => p.selected).map(p => p.name))];
+  const desel = [...new Set(names.filter(p => !p.selected).map(p => p.name))].filter(n => !sel.includes(n));
+  const parts = [tool, "-r", "req.txt", "--batch"];
+  const val = (flag, key) => { if (o[key] !== undefined && o[key] !== "") parts.push(`${flag}=${o[key]}`); };
+  val("--level", "level");
+  if (tool === "sqlmap") val("--risk", "risk");
+  val("--technique", "technique"); val("--dbms", "dbms"); val("--threads", "threads");
+  if (tool === "sqlmap") val("--tamper", "tamper");
+  val("--timeout", "timeout"); val("--time-sec", "time_sec"); val("--delay", "delay");
+  val("--retries", "retries"); val("--prefix", "prefix"); val("--suffix", "suffix"); val("--proxy", "proxy");
+  if (sel.length && desel.length) parts.push("-p " + sel.join(","));
+  if (tool === "sqlmap" && desel.length) parts.push("--skip=" + desel.join(","));
+  if (o.force_ssl) parts.push("--force-ssl");
+  if (o.random_agent) parts.push("--random-agent");
+  const enums = [["get_banner", "--banner"], ["get_current_user", "--current-user"],
+                 ["get_current_db", "--current-db"], ["get_hostname", "--hostname"], ["get_dbs", "--dbs"]];
+  if (tool === "sqlmap") enums.push(["is_dba", "--is-dba"]);
+  enums.forEach(([k, f]) => { if (o[k]) parts.push(f); });
+  const extra = (o.extra_flags || "").trim();
+  if (extra) parts.push(extra);
+  return parts.join(" ");
+}
+function updateCmdPreview() {
+  const el = $("#cmdPreview"); if (!el) return;
+  const cmd = buildCmdPreview();
+  el.textContent = cmd || "選擇工具後,這裡會顯示實際會跑的指令。";
 }
 
 // ===== launch =============================================================
@@ -680,16 +779,22 @@ async function openScanDetail(id) {
   await pullDetailLog();
   renderBoardIfChanged(true);
 }
+let _pullingLog = false;
 async function pullDetailLog() {
-  if (state.detailId == null) return;
+  // guard against tick() and openScanDetail() pulling the same offset at once,
+  // which would append the same chunk to detailCache twice
+  if (state.detailId == null || _pullingLog) return;
+  _pullingLog = true;
+  const forId = state.detailId;
   try {
-    const r = await api(`/api/scans/${state.detailId}/log?offset=${state.detailOffset || 0}`);
+    const r = await api(`/api/scans/${forId}/log?offset=${state.detailOffset || 0}`);
+    if (state.detailId !== forId) return;   // user switched scans mid-request
     if (r.chunk) {
       state.detailCache += r.chunk; state.detailOffset = r.offset;
       const view = $("#sdLog"); const atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
       view.textContent = state.detailCache; if (atBottom) view.scrollTop = view.scrollHeight;
     } else if (!state.detailCache) { $("#sdLog").textContent = "(尚無輸出)"; }
-  } catch (e) {}
+  } catch (e) {} finally { _pullingLog = false; }
 }
 async function stopScan(id) {
   try { await api(`/api/scans/${id}/stop`, "POST"); toast("已送出中止(實際殺掉程序後才會標記 killed)", "ok"); }
@@ -1070,6 +1175,8 @@ function init() {
   $("#statusFilter").onchange = loadScans;
   $$("[data-sel]").forEach(b => b.onclick = () => selectParams(b.dataset.sel));
   $$('input[name="tool"]').forEach(r => r.onchange = () => selectTool(r.value, { autoDefault: true }));
+  $("#optGrid").addEventListener("input", updateCmdPreview);      // live command preview
+  $("#optToggles").addEventListener("change", updateCmdPreview);
   $("#applyTplBtn").onclick = applySelectedTemplate;
   $("#templateSelect").onchange = applySelectedTemplate;
   $("#editTplLink").onclick = () => showSettings("templates");

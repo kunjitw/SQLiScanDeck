@@ -241,6 +241,20 @@ def create_scans(payload: dict = Body(...)):
     if not parsed.get("ok"):
         raise HTTPException(400, "請求解析失敗:{}".format("; ".join(parsed.get("warnings", []))))
 
+    # Reconcile the client's selection against the request we ACTUALLY parse here
+    # (this parse is the source of the -r file). If the raw request was edited
+    # after the UI parsed it, stale param names would otherwise be tested. Carry
+    # the user's checkbox choices onto the freshly-parsed params by (name,
+    # location); vanished params drop out, brand-new ones default to unselected.
+    sel_map = {(p.get("name"), p.get("location")): bool(p.get("selected")) for p in params}
+    params = [dict(p, selected=sel_map.get((p.get("name"), p.get("location")), False))
+              for p in parsed.get("params", [])]
+
+    # Guard the all-deselected case the UI already blocks (direct API clients):
+    # sqlmap would get skip=<every name> and abort "all parameters were skipped".
+    if params and not any(p.get("selected") for p in params):
+        raise HTTPException(400, "請至少勾選一個要測試的參數")
+
     launched = []
     for tool in tools:
         row = manager.create_scan(parsed, tool, options, params,

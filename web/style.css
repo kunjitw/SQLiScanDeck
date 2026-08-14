@@ -136,6 +136,21 @@ input.mini { width: 100%; padding: 0.28rem 0.45rem; font-size: 0.78rem; }
 .field.wide { grid-column: 1 / -1; }
 .opts-toggles { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin-top: 0.7rem; }
 
+/* scan-option fields: ONE per row, top-to-bottom, each with purpose + default.
+   (only the scan/template option grids; the general-settings grid is unchanged) */
+#optGrid, #teOptGrid { grid-template-columns: 1fr; gap: 1rem; }
+.opt-row { display: grid; gap: 0.3rem; }
+.opt-head { display: flex; align-items: baseline; gap: 0.5rem; }
+.opt-label { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg); }
+.opt-default { font-family: var(--font-mono); font-size: 0.68rem; color: var(--fg-dim); }
+.opt-control { display: flex; align-items: center; gap: 0.6rem; }
+.opt-control > select, .opt-control > input[type="text"], .opt-control > input[type="number"] { flex: 1; min-width: 0; }
+.slider-control .opt-slider { flex: 1; accent-color: var(--accent); height: 4px; cursor: pointer; }
+.slider-control .opt-num { flex: 0 0 78px; width: 78px; text-align: center; }
+.opt-desc { font-size: 0.75rem; color: var(--fg-dim); line-height: 1.5; }
+/* live "what will actually run" command preview under the options */
+.cmd-preview { font-family: var(--font-mono); font-size: 0.76rem; color: var(--fg-soft); background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.6rem 0.75rem; margin: 0; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
+
 /* kv-grid (parse summary) — stacked vertically, one row per field */
 .kv-grid { display: grid; grid-template-columns: 1fr; gap: 0.3rem; }
 .kv-grid .kv { display: flex; gap: 0.6rem; font-size: 0.82rem; padding: 0.15rem 0; border-bottom: 1px solid var(--border); }

@@ -64,6 +64,9 @@ def resolve_tool_dir(canonical_name, marker_parts):
 SQLMAP_DIR = resolve_tool_dir("sqlmap", ["sqlmapapi.py"])
 SQLMAP_PY = os.path.join(SQLMAP_DIR, "sqlmap.py")
 SQLMAPAPI_PY = os.path.join(SQLMAP_DIR, "sqlmapapi.py")
+# launcher that puts SQLMAP_DIR on sys.path first (embeddable python's ._pth
+# won't, so sqlmapapi.py can't `import lib` when run directly)
+SQLMAPAPI_LAUNCH = os.path.join(BACKEND_DIR, "sqlmapapi_launch.py")
 
 # ghauri: GitHub SOURCE run directly (NOT pip-installed); only its dependency
 # libraries are pip-installed. Launched via backend/ghauri_launch.py.

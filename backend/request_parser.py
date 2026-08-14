@@ -153,6 +153,8 @@ def parse_request(raw, force_ssl=False):
                 try:
                     obj = json.loads(body)
                     for name, value in _flatten_json(obj):
+                        if not name:   # bare scalar / unnamed leaf -> not targetable
+                            continue
                         params.append({"name": name, "location": "JSON",
                                        "value": "" if value is None else str(value)})
                 except Exception:

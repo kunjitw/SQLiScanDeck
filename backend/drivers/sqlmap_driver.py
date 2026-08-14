@@ -9,6 +9,7 @@ Runs synchronously inside a worker thread (the scan manager owns concurrency);
 cancellation is cooperative via ctx.should_stop().
 """
 import json
+import os
 import time
 import urllib.request
 import urllib.error
@@ -16,6 +17,38 @@ import urllib.error
 from drivers import base
 
 TOOL = "sqlmap"
+
+
+def equivalent_cmdline(ctx, opts):
+    """A readable, copy-pasteable sqlmap CLI that is EQUIVALENT to what the REST
+    API is asked to run (sqlmap actually runs via its API here). Shown to the
+    user so they can see exactly what is being tested."""
+    parts = ["sqlmap", "-r", os.path.basename(ctx.request_file), "--batch"]
+    value_flags = [
+        ("level", "--level"), ("risk", "--risk"), ("technique", "--technique"),
+        ("dbms", "--dbms"), ("threads", "--threads"), ("tamper", "--tamper"),
+        ("timeout", "--timeout"), ("timeSec", "--time-sec"), ("delay", "--delay"),
+        ("retries", "--retries"), ("prefix", "--prefix"), ("suffix", "--suffix"),
+        ("proxy", "--proxy"),
+    ]
+    for key, flag in value_flags:
+        v = opts.get(key)
+        if v not in (None, ""):
+            parts.append("{}={}".format(flag, v))
+    if opts.get("testParameter"):
+        parts.append("-p {}".format(opts["testParameter"]))
+    if opts.get("skip"):
+        parts.append("--skip={}".format(opts["skip"]))
+    if opts.get("forceSSL"):
+        parts.append("--force-ssl")
+    if opts.get("randomAgent"):
+        parts.append("--random-agent")
+    for key, flag in (("getBanner", "--banner"), ("getCurrentUser", "--current-user"),
+                      ("getCurrentDb", "--current-db"), ("getHostname", "--hostname"),
+                      ("getDbs", "--dbs"), ("isDba", "--is-dba")):
+        if opts.get(key):
+            parts.append(flag)
+    return " ".join(parts)
 
 
 def _req(url, payload=None, timeout=15):
@@ -111,7 +144,8 @@ def run(ctx):
 
     # 2) start scan with options
     opts = build_options(ctx)
-    ctx.append_log("選項:{}".format(json.dumps(opts, ensure_ascii=False)))
+    ctx.append_log("等效指令:{}".format(equivalent_cmdline(ctx, opts)))
+    ctx.append_log("(REST API 選項:{})".format(json.dumps(opts, ensure_ascii=False)))
     try:
         start = _req(base_url + "/scan/{}/start".format(taskid), payload=opts)
     except Exception as e:
@@ -133,6 +167,7 @@ def run(ctx):
     last = 0
     killed = False
     seen_running = False
+    startup_failed = False
     idle = 0
     while True:
         if ctx.should_stop():
@@ -172,6 +207,7 @@ def run(ctx):
             idle += 1
             if idle >= 8:  # ~10s and it never entered 'running'
                 ctx.append_log("!! sqlmap 任務長時間未進入執行狀態,判定啟動失敗。")
+                startup_failed = True
                 break
         time.sleep(1.2)
 
@@ -198,6 +234,9 @@ def run(ctx):
 
     if killed:
         ctx.finish(status="killed", vulnerable=vulnerable, findings=findings)
+    elif startup_failed:
+        # never ran -> mark error (not a green "done"), so history isn't poisoned
+        ctx.fail("sqlmap 任務未進入執行狀態,啟動失敗")
     else:
         ctx.append_log("=== sqlmap 掃描結束 ===")
         ctx.finish(status="done", vulnerable=vulnerable, findings=findings)
