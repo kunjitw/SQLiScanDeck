@@ -865,6 +865,7 @@ async function loadGeneralSettings() {
   $("#setMax").value = state.settings.max_concurrent; $("#setPort").value = state.settings.port;
   $("#setIpRefresh").value = state.settings.ip_refresh_seconds;
   $("#setPublicIp").checked = !!state.settings.public_ip_lookup; $("#setAutoOpen").checked = !!state.settings.auto_open_browser;
+  $("#setDefaultTool").value = state.settings.default_tool || "sqlmap";
 }
 async function saveGeneralSettings() {
   try {
@@ -872,6 +873,7 @@ async function saveGeneralSettings() {
       max_concurrent: Number($("#setMax").value) || 8, port: Number($("#setPort").value) || 8776,
       ip_refresh_seconds: Number($("#setIpRefresh").value) || 60,
       public_ip_lookup: $("#setPublicIp").checked, auto_open_browser: $("#setAutoOpen").checked,
+      default_tool: $("#setDefaultTool").value,
     });
     setIpSeconds(state.settings.ip_refresh_seconds); doIpRefresh();
     toast("已儲存(併發/埠變更需重啟)", "ok");
@@ -1153,8 +1155,14 @@ async function loadTemplates(applyLast) {
   state.templates = await api("/api/templates");
   const tool = selectedTool(); if (tool) populateTemplateDropdown(tool);
   if (applyLast) {
-    let last = ""; try { last = localStorage.getItem("lastTool") || ""; } catch (e) {}
-    if (last && SCHEMAS[last]) selectTool(last, { autoDefault: true });
+    // pre-select the user's chosen default tool (falls back to last-used, then sqlmap)
+    if (!state.settings || !state.settings.default_tool) {
+      try { state.settings = await api("/api/settings"); } catch (e) {}
+    }
+    let pref = (state.settings && state.settings.default_tool) || "";
+    if (!SCHEMAS[pref]) { try { pref = localStorage.getItem("lastTool") || ""; } catch (e) {} }
+    if (!SCHEMAS[pref]) pref = "sqlmap";
+    selectTool(pref, { autoDefault: true });
   }
 }
 

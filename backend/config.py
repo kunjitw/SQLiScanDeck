@@ -92,6 +92,7 @@ DEFAULTS = {
     "public_ip_timeout": 2.5, # seconds; failure is non-fatal
     "ip_refresh_seconds": 60, # how often the UI auto-refreshes the IP display
     "auto_open_browser": True,
+    "default_tool": "sqlmap", # which tool the composer pre-selects (sqlmap | ghauri)
 }
 
 
