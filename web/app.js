@@ -64,6 +64,7 @@ function animateCenterSwap(key) {
   el.addEventListener("animationend", function done() { el.classList.remove("swap-anim"); }, { once: true });
 }
 function applyTab(t) {
+  if (state.cmdEditing) _exitCmdEdit();   // never carry command-edit mode across a tab/project switch
   state.activeTabId = t.id;
   if (t.kind === "detail") {                 // read-only scan view: swap composer -> detail
     $("#composeArea").classList.add("hidden");
@@ -165,6 +166,17 @@ function _persistTabsToDb() {
   clearTimeout(_tabsDbTimer);
   _tabsDbTimer = setTimeout(() => { api("/api/projects/" + pid + "/tabs", "POST", { tabs_json: blob }).catch(() => {}); }, 800);
 }
+// flush a SPECIFIC project's current tabs to the DB immediately (not debounced). Used when
+// leaving a project -> the shared debounce would otherwise be cancelled by the new project.
+function _flushTabsToDbNow(pid) {
+  if (pid == null) return;
+  clearTimeout(_tabsDbTimer);
+  const body = JSON.stringify({ tabs_json: _tabsBlob() });
+  try {
+    if (navigator.sendBeacon) navigator.sendBeacon("/api/projects/" + pid + "/tabs", new Blob([body], { type: "application/json" }));
+    else api("/api/projects/" + pid + "/tabs", "POST", { tabs_json: _tabsBlob() }).catch(() => {});
+  } catch (e) {}
+}
 function saveTabs() {
   try {
     snapshotComposeTab();
@@ -174,11 +186,14 @@ function saveTabs() {
 }
 function restoreTabs() {
   let data = null;
-  try { data = JSON.parse(localStorage.getItem(tabsKey()) || "null"); } catch (e) {}
+  // Prefer the DB copy: it travels with data/ and is always correct for THIS dataset. localStorage
+  // is keyed by a numeric project id that collides across swapped data/ sets, so trusting it first
+  // could serve another dataset's tabs (with its cookies) -> only use it as a crash-recovery
+  // fallback when the DB copy is empty.
+  const proj = (state.projects || []).find(p => p.id === state.projectId);
+  if (proj && proj.tabs_json) { try { data = JSON.parse(proj.tabs_json); } catch (e) {} }
   if (!(data && Array.isArray(data.tabs) && data.tabs.length)) {
-    // localStorage empty (e.g. this data/ folder was moved to a fresh machine) -> use the DB copy
-    const proj = (state.projects || []).find(p => p.id === state.projectId);
-    if (proj && proj.tabs_json) { try { data = JSON.parse(proj.tabs_json); } catch (e) {} }
+    try { data = JSON.parse(localStorage.getItem(tabsKey()) || "null"); } catch (e) {}
   }
   if (data && Array.isArray(data.tabs) && data.tabs.length) {
     state.tabs = data.tabs;
@@ -264,6 +279,13 @@ async function loadDetailInto(scanId) {
   let s = null;
   try { s = await api(`/api/scans/${scanId}`); } catch (e) {}
   if (state.detailId !== scanId) { clearTimeout(_lt); return; }   // user switched mid-request -> abandon
+  if (!s && !cached) {   // scan gone (deleted, or a restored stale detail tab) -> show it, don't leave a stale pane
+    clearTimeout(_lt);
+    const _t = $("#sdTitle"); if (_t) _t.textContent = "#" + scanId + " 已不存在";
+    ["#sdMeta", "#sdActions", "#sdVerdict", "#sdParams", "#sdRequest", "#sdFindings"].forEach(sel => { const el = $(sel); if (el) el.innerHTML = ""; });
+    const lv = $("#sdLog"); if (lv) lv.textContent = "此掃描已被刪除或不存在(可關閉此分頁)。";
+    return;
+  }
   if (s) renderScanDetail(s);
   await pullDetailLog();
   clearTimeout(_lt);
@@ -980,7 +1002,10 @@ function updateCurrentProjectLabel() {
   if (el) el.textContent = p ? p.name : "—";
 }
 function setProject(pid) {
-  if (state.projectId != null && state.projectId !== pid) saveTabs();   // persist the project we're leaving
+  if (state.projectId != null && state.projectId !== pid) {
+    saveTabs();                        // localStorage + (debounced) DB for the project we're leaving
+    _flushTabsToDbNow(state.projectId);   // but flush its DB copy NOW -- the debounce would be cancelled by the new project
+  }
   state.projectId = pid;
   state.treeExpanded = null; state.treeKey = ""; state.currentTarget = null;   // reset per project
   updateCurrentProjectLabel();
@@ -1074,7 +1099,11 @@ async function parseRequest() {
   $("#parseWarn").textContent = "";
   if (!raw) { toast("請先貼上請求或 URL", "err"); return; }
   try {
-    const r = await api("/api/parse", "POST", { raw, project_id: state.projectId });
+    // send the scheme so the parse SUMMARY matches: a pasted URL's own scheme when present,
+    // otherwise the current HTTPS/HTTP toggle (default HTTPS). _syncSchemeFromRaw then aligns the toggle.
+    const _urlSch = _rawUrlScheme(raw);
+    const _fs = _urlSch != null ? (_urlSch === "https") : _currentForceSsl();
+    const r = await api("/api/parse", "POST", { raw, project_id: state.projectId, force_ssl: _fs });
     state.parsed = r; state.params = r.parsed.params.map(p => ({ ...p }));
     const warns = (r.parsed.warnings || []).slice();
     if (!r.parsed.host) warns.push("未解析到 Host — 可能解析錯誤");
@@ -1097,14 +1126,25 @@ async function parseRequest() {
     if (_hasTool) { _syncSchemeFromRaw(raw); updateCmdPreview(); }   // match the toggle to the pasted URL's scheme, then preview
   } catch (e) { toast("解析失敗:" + e.message, "err"); }
 }
-// If the pasted first line carries an explicit scheme (bare URL or absolute request line),
-// set the HTTPS/HTTP toggle to match it -- so it starts correct. The toggle stays clickable
-// (backend uses force_ssl authoritatively), so the user can still override the URL's scheme.
+// the explicit scheme on the FIRST line (bare URL or absolute request-line target), or null
+function _rawUrlScheme(raw) {
+  const m = ((raw || "").split(/\r?\n/)[0] || "").match(/\b(https?):\/\//i);
+  return m ? m[1].toLowerCase() : null;
+}
+// the HTTPS/HTTP seg-bool's current value (default HTTPS before it's rendered)
+function _currentForceSsl() {
+  const seg = $('#optGrid [data-optkey="force_ssl"], #commonPins [data-optkey="force_ssl"]');
+  if (!seg) return true;
+  const on = seg.querySelector(".seg-mini.active");
+  return on ? on.dataset.on === "1" : true;
+}
+// When the pasted first line carries an explicit scheme, set the HTTPS/HTTP toggle to match it
+// -- so it starts correct. The toggle stays clickable (backend uses force_ssl authoritatively),
+// so the user can still override the URL's scheme.
 function _syncSchemeFromRaw(raw) {
-  const first = (raw || "").split(/\r?\n/)[0] || "";
-  const m = first.match(/\b(https?):\/\//i);
-  if (!m) return;   // relative request -> leave the toggle as the user set it
-  const wantHttps = /^https$/i.test(m[1]);
+  const sch = _rawUrlScheme(raw);
+  if (!sch) return;   // relative request -> leave the toggle as the user set it
+  const wantHttps = sch === "https";
   const seg = $('#optGrid [data-optkey="force_ssl"], #commonPins [data-optkey="force_ssl"]');
   if (!seg) return;
   seg.querySelectorAll(".seg-mini").forEach(bt => bt.classList.toggle("active", (bt.dataset.on === "1") === wantHttps));
@@ -1721,9 +1761,15 @@ function applyCmdEdit() {
 }
 // tokenised command -> { opts, recognized[], unknownCount }. Managed core (-r/--batch/
 // --disable-coloring/--output-dir) is skipped; unknown or not-for-this-tool flags -> extra_flags.
+function _shellQuote(t) {   // re-quote a token with whitespace/quotes so backend shlex.split keeps it whole
+  return /[\s"'\\]/.test(t) ? '"' + String(t).replace(/(["\\])/g, "\\$1") + '"' : t;
+}
 function _reverseParseCmd(cmd) {
   const toks = _tokenizeCmd(cmd || "");
   const opts = {}, recognized = [], extras = [];
+  // a token is a FLAG (not a value) if it's a managed core arg or a mapped option flag
+  const isFlag = t => t === "-r" || t === "--batch" || t === "--disable-coloring"
+    || t.startsWith("--output-dir") || !!CMD_FLAG_KEY[t.split("=")[0]];
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
     if (i === 0) continue;                                   // tool name
@@ -1738,14 +1784,20 @@ function _reverseParseCmd(cmd) {
     const el = key && document.querySelector(`#optGrid [data-optkey="${key}"], #commonPins [data-optkey="${key}"]`);
     if (!el) { extras.push(t); continue; }                    // unknown / not-for-this-tool -> keep raw
     if (CMD_BARE.has(flag)) { opts[key] = true; recognized.push(key); continue; }
-    if (val === null) {                                       // value in the next token (space form)
-      if (i + 1 < toks.length && !toks[i + 1].startsWith("-")) { val = toks[i + 1]; i++; } else val = "";
+    if (val === null) {                                       // space-form: next token IS the value...
+      if (i + 1 < toks.length && !isFlag(toks[i + 1])) { val = toks[i + 1]; i++; }   // ...even if it starts with '-' (e.g. --suffix "-- -")
+      else val = "";
     }
     opts[key] = val; recognized.push(key);
   }
-  opts.force_ssl = toks.some(t => t === "--force-ssl");       // explicit scheme (present = HTTPS)
-  if (opts.force_ssl && recognized.indexOf("force_ssl") < 0) recognized.push("force_ssl");
-  if (extras.length) opts.extra_flags = extras.join(" ");
+  // scheme: only sqlmap renders --force-ssl in its command; ghauri's command carries no scheme
+  // flag, so inferring it would wrongly downgrade -> keep the current seg-bool value instead.
+  const tool = selectedTool();
+  opts.force_ssl = (tool === "sqlmap")
+    ? toks.some(t => t === "--force-ssl")
+    : !!gatherOptions("#optGrid", "#optToggles").force_ssl;
+  if (tool === "sqlmap" && opts.force_ssl && recognized.indexOf("force_ssl") < 0) recognized.push("force_ssl");
+  if (extras.length) opts.extra_flags = extras.map(_shellQuote).join(" ");   // preserve quoted multi-word values
   return { opts, recognized: [...new Set(recognized)], unknownCount: extras.filter(t => t.startsWith("-")).length };
 }
 function _flashOptions(keys) {

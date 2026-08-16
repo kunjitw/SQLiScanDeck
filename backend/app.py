@@ -102,9 +102,24 @@ def update_settings(payload: dict = Body(...)):
 # --------------------------------------------------------------------------
 # projects
 # --------------------------------------------------------------------------
+def _is_loopback():
+    return str(manager.settings.get("host", "127.0.0.1")).lower() in ("127.0.0.1", "localhost", "::1")
+
+
+def _gate_tabs(projs):
+    """tabs_json embeds the pasted raw request (Cookie/Authorization) -> withhold it from
+    non-loopback clients, exactly like get_scan withholds a scan's raw request on a 0.0.0.0 bind."""
+    if _is_loopback():
+        return projs
+    for p in (projs if isinstance(projs, list) else [projs]):
+        if isinstance(p, dict) and "tabs_json" in p:
+            p["tabs_json"] = ""
+    return projs
+
+
 @app.get("/api/projects")
 def list_projects():
-    return db.list_projects()
+    return _gate_tabs(db.list_projects())
 
 
 @app.post("/api/projects")
@@ -117,7 +132,7 @@ def create_project(payload: dict = Body(...)):
 
 @app.patch("/api/projects/{pid}")
 def patch_project(pid: int, payload: dict = Body(...)):
-    return db.update_project(pid, **(payload or {}))
+    return _gate_tabs(db.update_project(pid, **(payload or {})))
 
 
 @app.post("/api/projects/{pid}/tabs")
@@ -414,10 +429,9 @@ def scan_delete(sid: int):
 # --------------------------------------------------------------------------
 @app.middleware("http")
 async def _revalidate_static(request, call_next):
-    """Force browsers to revalidate the frontend assets instead of serving them
-    from cache heuristically. StaticFiles already sends ETag/Last-Modified, so a
-    reload becomes a cheap 304 when unchanged and a fresh 200 right after an edit
-    -- no more manual Ctrl+F5 to pick up CSS/JS changes."""
+    """Never let the browser cache the frontend assets: no-store means every reload is a
+    fresh 200 (no conditional 304), and the index route additionally cache-busts app.js/
+    style.css with a ?v=<content-hash>. Together they kill stale-JS/CSS after an edit."""
     resp = await call_next(request)
     path = request.url.path
     if path == "/" or path.endswith((".css", ".js", ".html")):
