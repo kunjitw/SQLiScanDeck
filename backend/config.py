@@ -93,6 +93,7 @@ DEFAULTS = {
     "scan_refresh_seconds": 2, # how often the board/tree/log poll for updates
     "auto_open_browser": True,
     "default_tool": "sqlmap", # which tool the composer pre-selects (sqlmap | ghauri)
+    "default_scan_mode": "advanced",  # composer's default mode every time (advanced | basic)
 }
 
 

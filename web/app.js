@@ -954,6 +954,7 @@ async function parseRequest() {
     renderBoardIfChanged();   // update the left "待掃描 · <endpoint>" placeholder now that we're parsed
     $("#resultCard").classList.remove("hidden");
     $("#toolCard").classList.remove("hidden");
+    if (!selectedTool()) _applyComposeDefaults();   // auto-select default tool + template + mode
     const _hasTool = !!selectedTool();   // reveal mode/template/options/footer if a tool is already picked
     $("#modeCard").classList.toggle("hidden", !_hasTool);
     $("#templateCard").classList.toggle("hidden", !_hasTool);
@@ -1173,6 +1174,15 @@ function selectParams(mode) {
 
 // ===== composer tool + templates ==========================================
 function selectedTool() { const el = $('input[name="tool"]:checked'); return el ? el.value : ""; }
+// pre-fill a fresh composer with the user's defaults -- tool + its ★default template
+// + default mode -- so they don't have to re-pick every time. Only used when nothing
+// is selected yet (never overrides a tool the user already chose in this tab).
+function _applyComposeDefaults() {
+  const s = state.settings || {};
+  let tool = s.default_tool; if (!SCHEMAS[tool]) tool = "sqlmap";
+  state.scanMode = (s.default_scan_mode === "basic") ? "basic" : "advanced";
+  selectTool(tool, { autoDefault: true });   // selects tool + applies is_default template + setScanMode
+}
 function selectTool(tool, opts) {
   opts = opts || {};
   const radio = $(`input[name="tool"][value="${tool}"]`); if (radio) radio.checked = true;
@@ -2281,6 +2291,7 @@ async function loadGeneralSettings() {
   $("#setIpRefresh").value = state.settings.ip_refresh_seconds;
   $("#setPublicIp").checked = !!state.settings.public_ip_lookup; $("#setAutoOpen").checked = !!state.settings.auto_open_browser;
   $("#setDefaultTool").value = state.settings.default_tool || "sqlmap";
+  $("#setDefaultMode").value = state.settings.default_scan_mode === "basic" ? "basic" : "advanced";
 }
 async function saveGeneralSettings() {
   try {
@@ -2290,6 +2301,7 @@ async function saveGeneralSettings() {
       scan_refresh_seconds: Number($("#setScanRefresh").value) || 2,
       public_ip_lookup: $("#setPublicIp").checked, auto_open_browser: $("#setAutoOpen").checked,
       default_tool: $("#setDefaultTool").value,
+      default_scan_mode: $("#setDefaultMode").value,
     });
     setIpSeconds(state.settings.ip_refresh_seconds); doIpRefresh();
     applyScanRefresh();   // takes effect immediately, no restart
@@ -2622,6 +2634,7 @@ async function loadTemplates(applyLast) {
     let pref = (state.settings && state.settings.default_tool) || "";
     if (!SCHEMAS[pref]) { try { pref = localStorage.getItem("lastTool") || ""; } catch (e) {} }
     if (!SCHEMAS[pref]) pref = "sqlmap";
+    state.scanMode = (state.settings && state.settings.default_scan_mode === "basic") ? "basic" : "advanced";
     selectTool(pref, { autoDefault: true });
   }
 }
