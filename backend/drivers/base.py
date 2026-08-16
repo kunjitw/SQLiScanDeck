@@ -43,12 +43,14 @@ def display_cmd(parts):
 # read_log(), so re-appending the block can't change this scan's verdict.
 
 _VULN_MARKERS = (
+    # CONFIRMED signals ONLY. "appears to be ... injectable" is TENTATIVE: sqlmap prints
+    # it before the false-positive check and then may retract it ("false positive ... does
+    # not seem to be injectable"). Counting the tentative phrasing here caused false
+    # positives -- a confirmed injection always prints one of the lines below.
     "is vulnerable",
     "the following injection point",
     "sqlmap identified the following injection",
     "injection point(s) with a total",
-    "appears to be injectable",
-    "parameter appears to be",
     "the parameter is vulnerable",
 )
 
@@ -115,11 +117,13 @@ _WEBTECH_RE = re.compile(r"web application technology:\s*(.+)", re.I)
 #   "the parameter 'id' is injectable with error-based"   (ghauri, confirmed)
 #   "GET parameter 'id' appears to be 'boolean-based blind' injectable"  (ghauri)
 #   "GET parameter 'id' does not seem to be injectable"   (both, clean)
-_PP_VULN_RES = (
+# CONFIRMED per-param vuln: "is vulnerable" / "is injectable" / "is 'TECHNIQUE' injectable".
+_PP_CONFIRMED_RES = (
     re.compile(r"parameter '([^']+)' is vulnerable", re.I),
-    re.compile(r"parameter '([^']+)' is injectable", re.I),
-    re.compile(r"parameter '([^']+)' appears to be '[^']*' injectable", re.I),
+    re.compile(r"parameter '([^']+)' is (?:'[^']*' )?injectable", re.I),
 )
+# TENTATIVE: "appears to be '...' injectable" -- provisional, may be retracted (below).
+_PP_TENTATIVE_RE = re.compile(r"parameter '([^']+)' appears to be '[^']*' injectable", re.I)
 _PP_CLEAN_RE = re.compile(r"parameter '([^']+)' does not seem to be injectable", re.I)
 
 # bonus non-SQLi heuristic findings sqlmap surfaces during a SQLi run
@@ -207,16 +211,21 @@ def caveats(log_text):
 
 
 def per_param_verdicts(log_text):
-    """Explicit per-parameter verdicts the tools print, keyed by param NAME:
-    {name: 'vulnerable' | 'clean'}. 'vulnerable' wins if a name appears in both
-    (a param that was confirmed injectable is injectable, whatever else printed)."""
+    """Explicit per-parameter verdicts, keyed by param NAME: {name: 'vulnerable'|'clean'}.
+    Precedence (weak -> strong): a merely TENTATIVE "appears to be ... injectable" is
+    provisional; an explicit rejection "does not seem to be injectable" (sqlmap's
+    false-positive retraction) overrides it; a CONFIRMED "is vulnerable/injectable" wins
+    outright. This stops a tentative hit that the tool LATER rejects from being recorded
+    as a confirmed injection (which used to poison the dedup history)."""
     text = log_text or ""
     verdicts = {}
+    for m in _PP_TENTATIVE_RE.finditer(text):
+        verdicts.setdefault(m.group(1), "vulnerable")   # provisional (weakest)
     for m in _PP_CLEAN_RE.finditer(text):
-        verdicts[m.group(1)] = "clean"
-    for rx in _PP_VULN_RES:
+        verdicts[m.group(1)] = "clean"                  # rejection overrides a tentative
+    for rx in _PP_CONFIRMED_RES:
         for m in rx.finditer(text):
-            verdicts[m.group(1)] = "vulnerable"
+            verdicts[m.group(1)] = "vulnerable"         # confirmation wins outright
     return verdicts
 
 
