@@ -103,6 +103,7 @@
         <div class="seg-group mode-seg">
           <button type="button" class="seg-btn" data-mode="basic" id="modeBasicBtn">基本掃描</button>
           <button type="button" class="seg-btn" data-mode="advanced" id="modeAdvBtn">進階掃描</button>
+          <button type="button" class="seg-btn" data-mode="custom" id="modeCustomBtn">全自訂</button>
         </div>
         <span class="mode-hint" id="modeHint"></span>
       </div>
@@ -122,16 +123,26 @@
     <section class="panel hidden" id="optionsCard">
       <div class="section-head"><span class="bar"></span><span id="optionsTitle">6 · 掃描選項</span></div>
       <div id="toolOptions" class="hidden">
-        <p class="basic-hint hidden" id="basicHint">基本模式:選一個範本即套用,下面只顯示「此範本有設定的項目」(唯讀)。要自由調整改選「進階掃描」。</p>
+        <p class="basic-hint hidden" id="basicHint">基本模式:選一個範本即套用。下面顯示「此範本有設定的項目」(唯讀),另外保留幾個<b>可自行調整</b>的基本設定(強制 HTTPS、隨機 UA)。要完全自由調整改選「進階掃描」。</p>
         <div class="opts-grid" id="optGrid"></div>
         <div class="opts-toggles" id="optToggles"></div>
       </div>
     </section>
 
+    <!-- 6 · 全自訂:no option controls -- the user types the flags themselves -->
+    <section class="panel hidden" id="customCard">
+      <div class="section-head"><span class="bar"></span><span id="customTitle">6 · 自訂指令</span></div>
+      <p class="custom-hint">自己填要傳給工具的旗標,下方「將執行」即時顯示完整指令。核心 <code>-r 請求檔 --batch --output-dir</code> 由系統管理,不用填。<br>掃描協定預設 <b>http</b>;打 https 目標(sqlmap)請自行加 <code>--force-ssl</code>。⚠ 互動式旗標(<code>--os-shell</code>/<code>--sql-shell</code> 等)會卡住(背景執行沒有 stdin),請勿使用。</p>
+      <textarea id="customFlags" class="custom-flags" rows="4" spellcheck="false" placeholder="例:--level 5 --risk 3 --technique BEUST --tamper space2comment --dbms MySQL --threads 8 --banner --dbs"></textarea>
+    </section>
+
     <!-- sticky bottom bar: command preview + note + launch (always visible while configuring) -->
     <div class="compose-footer hidden" id="composeFooter">
+      <!-- pinned 常用設置: the settings people touch most, always one glance above 將執行 -->
+      <div class="common-pins hidden" id="commonPins"></div>
       <div class="risk-line hidden" id="riskIndicator"></div>
       <div class="cf-cmd"><span class="cf-lbl">將執行</span><code class="cmd-preview" id="cmdPreview">選擇工具後,這裡會顯示實際會跑的指令。</code></div>
+      <div class="cmd-scheme-note hidden" id="cmdSchemeNote"></div>
       <div class="cf-row">
         <label class="cf-note"><span class="cf-lbl">備註</span><input id="scanNote" class="note-input" spellcheck="false" placeholder="選填,只記錄不影響掃描"></label>
         <button class="btn primary" id="launchBtn">開始掃描</button>
@@ -162,7 +173,15 @@
           </details>
         </div>
         <div class="sd-log-wrap">
-          <div class="log-label">原始輸出(判定依據已<mark class="log-hit">高亮</mark>)</div>
+          <div class="log-head">
+            <div class="seg-bool log-view-seg" id="logViewSeg">
+              <button type="button" class="seg-mini" data-logview="highlighted">高亮</button>
+              <button type="button" class="seg-mini" data-logview="original">原始</button>
+            </div>
+            <span class="log-label" id="logLabel">判定依據已高亮</span>
+            <label class="check inline log-pure" title="只保留工具真正輸出(含指令),隱藏系統加的開始/結束/目標/【判定】等附加行"><input type="checkbox" id="pureRawChk" checked><span>只顯示原始輸出</span></label>
+            <button class="btn ghost sm" id="shotBtn" title="把原始輸出匯出成圖片(可選行、改色、編輯)">📷 匯出圖片</button>
+          </div>
           <div class="log-view" id="sdLog"></div>
         </div>
       </section>
@@ -172,7 +191,6 @@
   <!-- ===== PROJECTS ENTRY ===== -->
   <main class="main-col settings-wrap hidden" id="projectsView">
     <div class="settings-head">
-      <button class="btn ghost sm" id="projectsBackBtn">← 返回儀表板</button>
       <h2>專案總覽</h2>
       <button class="btn primary sm" id="openNewProjectBtn">＋ 建立新專案</button>
     </div>
@@ -200,7 +218,8 @@
       <div class="section-head"><span class="bar"></span>一般設定</div>
       <div class="settings-col">
         <label class="field"><span>預設掃描工具(每次自動選)</span><select id="setDefaultTool"><option value="sqlmap">sqlmap</option><option value="ghauri">ghauri</option></select></label>
-        <label class="field"><span>預設掃描模式(每次自動套用)</span><select id="setDefaultMode"><option value="advanced">進階掃描</option><option value="basic">基本掃描</option></select></label>
+        <label class="field"><span>預設掃描模式(每次自動套用)</span><select id="setDefaultMode"><option value="advanced">進階掃描</option><option value="basic">基本掃描</option><option value="custom">全自訂</option></select></label>
+        <label class="field"><span>掃描結果預設檢視</span><select id="setDefaultLogView"><option value="highlighted">我們的高亮</option><option value="original">原始(終端配色)</option></select></label>
         <label class="field"><span>同時併發掃描數(改後需重啟)</span><input id="setMax" type="number" min="1" max="32"></label>
       </div>
 
@@ -215,6 +234,10 @@
         <label class="check"><input type="checkbox" id="setPublicIp"> 嘗試顯示公網 IP(內網失敗自動略過)</label>
         <label class="check"><input type="checkbox" id="setAutoOpen"> 啟動時自動開瀏覽器</label>
       </div>
+
+      <div class="subhead">常用設置(顯示在掃描頁「將執行」上方,方便快速調整)</div>
+      <p class="panel-note">勾選的選項會被抽到掃描頁指令上方的「⚡ 常用設置」快捷區,不用再往上找。標 <span class="pin-tool-badge">sqlmap</span> / <span class="pin-tool-badge">ghauri</span> 表示該選項只有那個工具有。危險操作(匯出/執行 SQL/取 shell 等)不提供釘選。</p>
+      <div class="pin-chooser" id="pinChooser"></div>
 
       <div class="composer-actions end"><button class="btn primary" id="setSave">儲存一般設定</button></div>
     </section>
@@ -339,6 +362,25 @@
   <div class="ph-body" id="phBody"></div>
   <div class="modal-actions">
     <button class="btn ghost" id="phClose" data-close>關閉</button>
+  </div>
+</div>
+
+<!-- 匯出輸出圖片:選版本(外面決定)、渲染顏色、拖曳選行、編輯內容 -> 下載/複製 PNG -->
+<div class="modal wide-modal shot-modal hidden" id="shotModal">
+  <div class="modal-head"><span id="shotTitle">匯出輸出圖片</span></div>
+  <div class="shot-toolbar">
+    <label class="check inline"><input type="checkbox" id="shotColor" checked><span>渲染顏色</span></label>
+    <button type="button" class="btn ghost sm" id="shotEdit" title="改成可編輯,直接修改文字內容">✏ 編輯</button>
+    <span class="shot-sep"></span>
+    <button type="button" class="btn ghost sm" id="shotAll">全選</button>
+    <button type="button" class="btn ghost sm" id="shotNone">全不選</button>
+    <span class="shot-hint" id="shotHint">拖曳可勾選/取消要放進圖片的行(灰掉的不會進圖片);右下角可拖曳調整寬度</span>
+  </div>
+  <div class="shot-capture-wrap"><div class="shot-capture" id="shotCapture"></div></div>
+  <div class="modal-actions">
+    <button class="btn ghost" data-close>取消</button>
+    <button class="btn ghost" id="shotCopy">複製到剪貼簿</button>
+    <button class="btn primary" id="shotDownload">下載 PNG</button>
   </div>
 </div>
 

@@ -333,7 +333,27 @@ input.mini { width: 100%; padding: 0.28rem 0.45rem; font-size: 0.78rem; }
 .opt-row.basic-hidden, .check.basic-hidden, .opt-sec.basic-hidden, .opt-subhead.basic-hidden { display: none !important; }
 .mode-basic #optToolLabel { display: none; }
 .mode-basic .opt-control :disabled, .mode-basic input:disabled, .mode-basic select:disabled, .mode-basic textarea:disabled { opacity: 0.92; cursor: default; }
+/* basic mode: the few still-editable settings (force_ssl/random_agent) pop out of the
+   read-only template preview -- accent rail + a 可調 tag so the user sees what they can touch. */
+.mode-basic .check.basic-editable { opacity: 1; border-left: 3px solid var(--accent); padding-left: 0.5rem; background: var(--accent-soft); border-radius: 3px; }
+.mode-basic .check.basic-editable input:not(:disabled) { opacity: 1; cursor: pointer; }
+.mode-basic .check.basic-editable .check-name::after { content: "可調"; margin-left: 0.4rem; font-size: 0.62rem; font-weight: 600; color: var(--accent); border: 1px solid var(--accent); border-radius: 3px; padding: 0 0.24rem; vertical-align: middle; }
+.mode-basic .opt-row.basic-editable { opacity: 1; }
+.mode-basic .opt-row.basic-editable .opt-label::after { content: "可調"; margin-left: 0.4rem; font-size: 0.62rem; font-weight: 600; color: var(--accent); border: 1px solid var(--accent); border-radius: 3px; padding: 0 0.24rem; }
+/* two-choice segmented control (e.g. HTTPS/HTTP scheme picker), matches the mode/tool seg look */
+.seg-bool { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.seg-mini { font: inherit; font-size: 0.72rem; font-weight: 600; padding: 0.16rem 0.55rem; background: transparent; color: var(--fg-soft); border: none; cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast); }
+.seg-mini + .seg-mini { border-left: 1px solid var(--border); }
+.seg-mini:not(.active):hover { background: var(--bg-soft); color: var(--fg); }
+.seg-mini.active { background: var(--accent-soft); color: var(--accent); }
+.seg-mini:disabled { cursor: default; opacity: 0.6; }
 .basic-hint { font-size: 0.76rem; color: var(--fg-soft); margin: 0 0 0.6rem; padding: 0.4rem 0.55rem; border-left: 3px solid var(--accent); background: var(--accent-soft); }
+/* 全自訂 (fully custom) mode: free-flags textarea, no option controls */
+.custom-hint { font-size: 0.76rem; color: var(--fg-soft); margin: 0 0 0.6rem; line-height: 1.6; }
+.custom-hint code { font-family: var(--font-mono); font-size: 0.9em; background: var(--code-bg); padding: 0 3px; border-radius: 3px; }
+.custom-flags { width: 100%; box-sizing: border-box; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.5; padding: 0.6rem 0.7rem; background: var(--code-bg); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-sm); resize: vertical; min-height: 4rem; }
+.custom-flags:focus { outline: none; border-color: var(--accent); }
+.compose-footer.custom-mode #commonPins { display: none !important; }   /* the pinned strip is an option control -> hide it in 全自訂 */
 /* Sticky command + note + launch footer -- must read as fixed viewport CHROME, not "the last
    card that sticks". Root fix: it used to share the cards' --bg-elev surface (identical colour =
    mushy). Now: distinct --elevated ("floating" rung, cards read as behind it), full-bleed to the
@@ -346,14 +366,43 @@ input.mini { width: 100%; padding: 0.28rem 0.45rem; font-size: 0.78rem; }
    -> step the bar to the light-gray rung instead so it stays distinct from the white cards */
 :root[data-theme="light"] .compose-footer { background: var(--bg-soft); }
 @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .compose-footer { background: var(--bg-soft); } }
+/* ⚡ 常用設置 — pinned quick-settings strip at the top of the footer, right above 將執行.
+   ONE compact wrapping row, minimal chrome (just a thin accent rail). Descriptions/presets
+   hidden -- the full options card still carries them. */
+.common-pins { background: var(--code-bg); border-left: 2px solid var(--accent); padding: 0.3rem 0.55rem; }
+.common-pins-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.85rem; }
+.common-pins-head { font-size: 0.62rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+.common-pins .cp-hint { font-size: 0.62rem; color: var(--fg-dim); white-space: nowrap; margin-left: auto; }   /* trails to the right */
+.common-pins .opts-toggles { display: contents; }   /* each toggle becomes a direct row item */
+.common-pins .opt-row, .common-pins .check { margin: 0; padding: 0; }
+.common-pins .check { display: inline-flex; align-items: center; gap: 0.3rem; }
+.common-pins .opt-row { display: inline-flex; align-items: center; gap: 0.35rem; }
+.common-pins .opt-desc, .common-pins .check-desc, .common-pins .opt-presets { display: none; }
+.common-pins .opt-head, .common-pins label, .common-pins .check-name { font-size: 0.72rem; margin: 0; }
+.common-pins .opt-control input[type=text], .common-pins .opt-control select, .common-pins .opt-num { font-size: 0.72rem; }
+.common-pins .opt-row:has(.opt-checks), .common-pins .opt-row.wide { flex-basis: 100%; }   /* if pinned: technique/tamper take their own line */
+.common-pins .opt-checks { display: flex; flex-wrap: wrap; gap: 0.15rem 0.5rem; }
+/* 常用設置 chooser in 設定 */
+.pin-chooser { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 0.25rem 0.7rem; margin-top: 0.5rem; }
+.pin-opt { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; cursor: pointer; padding: 0.12rem 0; }
+.pin-opt input { flex-shrink: 0; }
+.pin-opt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pin-tool-badge { flex-shrink: 0; font-size: 0.6rem; font-weight: 600; color: var(--fg-dim); border: 1px solid var(--border); border-radius: 3px; padding: 0 0.24rem; }
 .cf-cmd { display: flex; align-items: flex-start; gap: 0.5rem; }
 .cf-lbl { font-family: var(--font-mono); font-size: 0.62rem; font-weight: 700; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.08em; flex-shrink: 0; padding-top: 0.25rem; }
 /* recessed terminal WELL (not a card-in-a-card): --code-bg is ~16 L* below the --elevated bar,
    plus an inset top lip + accent gutter -> reads as sunken, unifying the bar */
 .compose-footer .cmd-preview { flex: 1; min-width: 0; margin: 0; max-height: 4.2rem; overflow: auto; font-size: 0.72rem; padding: 0.4rem 0.55rem; border: 0; border-left: 2px solid var(--accent); border-radius: 0; box-shadow: inset 0 1px 2px rgba(0,0,0,0.55); }
 /* command <-> option cross-highlight: clickable command tokens + a jump-flash on the field */
-.cmd-tok { cursor: pointer; border-radius: var(--radius-xs); padding: 0 1px; transition: background var(--dur-fast); }
-.cmd-tok:hover, .cmd-tok-hl { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); }
+/* clickable command tokens carry a RESTING affordance (dotted underline + tinted) so it's
+   obvious WHICH parts of 將執行 jump to a setting -- plain args (-r, --batch, --output-dir) stay unstyled */
+.cmd-tok { cursor: pointer; border-radius: var(--radius-xs); padding: 0 1px; color: var(--accent); text-decoration: underline; text-decoration-style: dotted; text-decoration-thickness: 1px; text-underline-offset: 3px; transition: background var(--dur-fast); }
+.cmd-tok:hover, .cmd-tok-hl { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); text-decoration: none; }
+/* grey GHOST: a pinned 常用設置 not yet in the command. Setting it -> the real blue token
+   appears and this ghost drops out, so the pin visibly "lights up" the instant you set it. */
+.cmd-ghosts { opacity: 0.9; }
+.cmd-tok.cmd-ghost { color: var(--fg-dim); font-style: italic; text-decoration-style: dashed; }
+.cmd-tok.cmd-ghost:hover, .cmd-tok.cmd-ghost.cmd-tok-hl { background: var(--bg-soft); box-shadow: inset 0 0 0 1px var(--fg-dim); color: var(--fg-soft); }
 .opt-flash { background: var(--accent-soft) !important; box-shadow: inset 0 0 0 1px var(--accent); border-radius: var(--radius-xs); }
 .cf-row { display: flex; align-items: center; gap: 0.6rem; }
 .cf-note { flex: 1; display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
@@ -624,6 +673,33 @@ table tr:last-child td { border-bottom: none; }
 .log-verdict { color: var(--accent); font-weight: 600; }
 .log-hit { background: var(--warn-soft); color: var(--warn); border-radius: 0; padding: 0 2px; }
 .log-enum { background: var(--accent-soft); color: var(--accent); border-radius: 0; padding: 0 2px; }   /* parsed enumeration value (banner / user / db / ...) */
+/* raw-output view toggle header (高亮 / 原始 + 只顯示原始 + 匯出圖片) */
+.log-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
+.log-head .log-view-seg { flex-shrink: 0; }
+.log-head .log-label { margin: 0; font-size: 0.72rem; color: var(--fg-dim); }
+.log-head .log-pure { margin-left: auto; font-size: 0.74rem; }
+.log-head #shotBtn { flex-shrink: 0; }
+.check.inline { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }
+/* ghauri scheme note under the command (http/https is applied via request rewrite, not a flag) */
+.cmd-scheme-note { font-size: 0.68rem; color: var(--fg-dim); padding: 0.1rem 0.2rem 0; line-height: 1.4; }
+/* 匯出輸出圖片 modal */
+.shot-modal { max-width: min(920px, 94vw); }
+.shot-toolbar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.55rem; }
+.shot-toolbar .check.inline { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; cursor: pointer; }
+.shot-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 0.15rem; }
+.shot-hint { font-size: 0.7rem; color: var(--fg-dim); margin-left: auto; }
+.shot-toolbar .btn.active { background: var(--accent-soft); color: var(--accent); }
+/* resize: horizontal -> a drag handle at the bottom-right lets the tester set the image
+   width (and thus wrapping / aspect ratio). _shotToPng reads the resulting clientWidth. */
+.shot-capture-wrap { max-height: 56vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); resize: horizontal; width: 100%; min-width: 340px; max-width: 100%; }
+.shot-capture { background: #1e1e1e; color: #d4d4d4; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; padding: 16px; white-space: pre-wrap; word-break: break-word; min-height: 4rem; }
+.shot-capture .shot-line { border-radius: 2px; }
+.shot-capture:not(.editing) .shot-line { cursor: pointer; }
+.shot-capture:not(.editing) .shot-line:hover { background: rgba(255,255,255,0.06); }
+.shot-capture .shot-line.shot-excluded { opacity: 0.25; text-decoration: line-through; }
+.shot-capture.no-color .shot-line { color: #d4d4d4 !important; }
+.shot-capture.editing { cursor: text; outline: 1px dashed var(--accent); outline-offset: -1px; }
+.shot-capture.editing .shot-line { cursor: text; }
 /* ONE unified outcome chip (scan list, tree, param table) */
 .state-chip { display: inline-flex; align-items: center; justify-content: center; font-size: 0.68rem; font-weight: 700; padding: 0.14rem 0.5rem; border-radius: var(--radius-xs); border: 1px solid transparent; white-space: nowrap; flex-shrink: 0; min-width: 3.4rem; text-align: center; }
 .state-chip.st-vuln { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }

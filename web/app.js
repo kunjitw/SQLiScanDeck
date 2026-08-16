@@ -13,6 +13,8 @@ const state = {
   boardKey: "",
   treeExpanded: null, treeKey: "", currentTarget: null, scanMode: "advanced",
   detailId: null, detailOffset: 0, detailCache: "",
+  logView: null,   // "highlighted" | "original"; null -> fall back to settings.default_log_view
+  pureRaw: true,   // 原始輸出 only shows the tool's own output (hide our開始/結束/目標/【判定】 wrappers)
   editingTplId: null,
   skipCollapsed: true,   // auto-skipped params start collapsed at the bottom
   headerCollapsed: true, // Header-location params start collapsed too
@@ -43,6 +45,7 @@ function snapshotComposeTab() {
   const tool = selectedTool();
   t.tool = tool || null;
   t.options = tool ? gatherOptions("#optGrid", "#optToggles") : null;
+  t.customFlags = ($("#customFlags") && $("#customFlags").value) || "";   // 全自訂 typed flags
   t.scanMode = state.scanMode;
   t.note = ($("#scanNote") && $("#scanNote").value) || "";
   t.title = t.parsed ? (t.parsed.endpoint || (t.parsed.parsed && t.parsed.parsed.url) || "新分頁")
@@ -96,6 +99,7 @@ function applyTab(t) {
   if (t.tool) {
     selectTool(t.tool);                                   // renders options + shows mode/options/footer
     applyOptions(t.options || {}, "#optGrid", "#optToggles");
+    if ($("#customFlags")) $("#customFlags").value = t.customFlags || "";   // restore 全自訂 flags
     setScanMode(t.scanMode);                              // per-tab mode (defaults to advanced)
   } else {
     $$('input[name="tool"]').forEach(r => r.checked = false);
@@ -347,8 +351,8 @@ function _scanRevealKeys(s) {
 // `def` = the tool's own default (shown to the user; leaving a field blank uses it).
 // type "slider" renders a range + a synced manual number box.
 const COMMON_TOGGLES = [
-  { key: "force_ssl", label: "強制 HTTPS", def: true,
-    desc: "預設開啟(多數站是 https)。sqlmap 會加 --force-ssl 強制走 https;打 http-only / localhost 時請取消。(ghauri 本來就預設 https,不受此影響)" },
+  { key: "force_ssl", type: "segbool", label: "連線協定", def: true, onLabel: "HTTPS", offLabel: "HTTP",
+    desc: "請求用哪種協定送出。兩個工具行為一致(sqlmap 靠 --force-ssl、ghauri 靠改寫 Referer,結果都是同一個協定);憑證兩邊都『不驗證』(自簽/過期也能測)。打 http-only / localhost 選 HTTP。" },
   { key: "random_agent", label: "隨機 User-Agent", desc: "每次用隨機瀏覽器 UA,降低被指紋辨識/擋下。" },
   { key: "text_only", label: "只比對文字", desc: "只比對回應的純文字、忽略 HTML 標籤;頁面雜訊多時較穩(--text-only)。" },
 ];
@@ -520,6 +524,17 @@ function optHead(f) {
 function optDesc(f) { return f.desc ? `<div class="opt-desc">${esc(f.desc)}</div>` : ""; }
 function renderFieldHtml(f) {
   const wide = f.wide ? " wide" : "";
+  if (f.type === "segbool") {
+    // a two-choice segmented control backed by a boolean option (e.g. HTTPS/HTTP for
+    // force_ssl). gatherOptions/applyOptions read/write the active segment. data-defon
+    // preserves the "store the boolean explicitly" semantics of a default-on toggle.
+    const on = f.def !== false;
+    return `<div class="opt-row${wide}"><div class="opt-head"><span class="opt-label">${esc(f.label)}</span></div><div class="opt-control">`
+      + `<div class="seg-bool" data-optkey="${f.key}" data-defon="${on ? 1 : 0}">`
+      + `<button type="button" class="seg-mini${on ? " active" : ""}" data-on="1">${esc(f.onLabel || "開")}</button>`
+      + `<button type="button" class="seg-mini${on ? "" : " active"}" data-on="0">${esc(f.offLabel || "關")}</button>`
+      + `</div></div>${optDesc(f)}</div>`;
+  }
   if (f.type === "slider") {
     const def = f.def != null ? f.def : f.min;
     return `<div class="opt-row${wide}">${optHead(f)}
@@ -613,6 +628,61 @@ function _optGroupKey(key) {
   for (const [g, , keys] of OPT_GROUPS) if (keys.includes(key)) return g;
   return "detect";
 }
+// 基本掃描 (basic) mode is otherwise "pick a template, everything read-only". But a few
+// settings depend on the TARGET, not on the injection strategy — whether to force HTTPS
+// (http/localhost targets must untick it) and whether to randomise the UA. Forcing the
+// user into 進階 just to flip those is silly, so they stay EDITABLE in basic mode. All of
+// them live in the 常用 zone, so they render together in one block (no hunting).
+const BASIC_EDITABLE = ["force_ssl", "random_agent"];
+
+// ===== 常用設置 (pinned quick-settings strip above the command preview) =======
+// A user-chosen subset of options is lifted OUT of the big options card and rendered
+// in a compact strip pinned right above 將執行, so the settings people touch most (the
+// "force-ssl tier": per-target essentials) are always one glance away. Which keys appear
+// is configurable in 設定. Each key lives in exactly ONE place (strip OR card, never both)
+// so gatherOptions never double-reads. danger keys are never pinnable.
+// Canonical order for both the strip and the settings chooser:
+const PIN_ORDER = [
+  "force_ssl", "random_agent", "text_only",
+  "level", "risk", "technique", "threads", "dbms", "tamper",
+  "time_sec", "timeout", "delay", "retries", "proxy",
+  "prefix", "suffix",
+  "ignore_code", "headers", "test_string", "not_string", "code", "regexp",
+  "auth_type", "auth_cred", "csrf_token", "csrf_url",
+  "get_banner", "get_current_user", "get_current_db", "get_hostname", "get_dbs", "is_dba",
+];
+// default pin set: keep it TINY so the strip stays compact -- just the two per-target
+// connection toggles. Everything else is one click away in 設定. Used only when
+// settings.pinned_common is absent.
+const PINNED_DEFAULT = ["force_ssl", "random_agent"];
+function _pinnedKeys() {
+  const s = state.settings || {};
+  return Array.isArray(s.pinned_common) ? s.pinned_common : PINNED_DEFAULT;
+}
+// map key -> its schema option object for a tool (non-danger only; danger keys never pin)
+function _optCatalog(tool) {
+  const schema = SCHEMAS[tool]; if (!schema) return {};
+  const byKey = {};
+  schema.fields.concat(COMMON_FIELDS, COMMON_TOGGLES, schema.toggles)
+    .forEach(o => { if (!o.danger) byKey[o.key] = o; });
+  return byKey;
+}
+// ordered option objects to render in the strip for this tool (pinned ∩ available)
+function _pinnedForTool(tool) {
+  const byKey = _optCatalog(tool);
+  const want = new Set(_pinnedKeys());
+  return PIN_ORDER.filter(k => want.has(k) && byKey[k]).map(k => byKey[k]);
+}
+// every pinnable key across both tools (for the 設定 chooser), in canonical order,
+// each tagged with which tools expose it.
+function _pinCatalog() {
+  const sql = _optCatalog("sqlmap"), gha = _optCatalog("ghauri");
+  return PIN_ORDER.filter(k => sql[k] || gha[k]).map(k => {
+    const o = sql[k] || gha[k];
+    const tools = [sql[k] && "sqlmap", gha[k] && "ghauri"].filter(Boolean);
+    return { key: k, label: o.label, tools };
+  });
+}
 // render a mixed list of fields (have .type) + toggles (no .type); toggles sit
 // in a .opts-toggles flex row so they read as a group of checkboxes.
 function renderOptGroup(opts) {
@@ -621,20 +691,25 @@ function renderOptGroup(opts) {
   return fields.map(renderFieldHtml).join("")
     + (toggles.length ? `<div class="opts-toggles">${toggles.map(renderToggleHtml).join("")}</div>` : "");
 }
-function renderOptions(tool, gridSel, togglesSel, labelSel) {
+function renderOptions(tool, gridSel, togglesSel, labelSel, pinsSel) {
   const schema = SCHEMAS[tool]; if (!schema) return;
   const all = schema.fields.concat(COMMON_FIELDS, COMMON_TOGGLES, schema.toggles);
   const danger = all.filter(o => o.danger);
+  // 常用設置: lift the pinned options OUT of the card into the footer strip. Only when a
+  // pins container is wired (composer, not the template editor). Each key lives in exactly
+  // one place -> no duplicate data-optkey for gatherOptions to double-read.
+  const pins = (pinsSel && $(pinsSel)) ? _pinnedForTool(tool) : [];
+  const pinSet = new Set(pins.map(o => o.key));
   const byGroup = {};
-  all.filter(o => !o.danger).forEach(o => {
+  all.filter(o => !o.danger && !pinSet.has(o.key)).forEach(o => {
     const g = _optGroupKey(o.key); (byGroup[g] = byGroup[g] || []).push(o);
   });
-  // 常用 — collapsible, default EXPANDED
-  const commonHtml = `
+  // 常用 — collapsible, default EXPANDED (hidden entirely if every common key got pinned)
+  const commonHtml = (byGroup.common && byGroup.common.length) ? `
     <div class="opt-sec opt-sec-common common-zone">
       <button type="button" class="opt-sec-head common-head"><span class="caret">▾</span>常用</button>
-      <div class="opt-sec-body common-body">${renderOptGroup(byGroup.common || [])}</div>
-    </div>`;
+      <div class="opt-sec-body common-body">${renderOptGroup(byGroup.common)}</div>
+    </div>` : "";
   // 進階 — collapsed, functional sub-headers
   const advBody = OPT_GROUPS.filter(([g]) => g !== "common").map(([g, label]) => {
     const os = byGroup[g]; if (!os || !os.length) return "";
@@ -653,11 +728,20 @@ function renderOptions(tool, gridSel, togglesSel, labelSel) {
     </div>` : "";
   $(gridSel).innerHTML = commonHtml + advHtml + dangerHtml;
   if (togglesSel && $(togglesSel)) $(togglesSel).innerHTML = "";   // everything lives in gridSel now
+  // render the pinned 常用設置 strip (real inputs, wired like the grid)
+  if (pinsSel && $(pinsSel)) {
+    const box = $(pinsSel);
+    box.classList.toggle("hidden", !pins.length);
+    box.innerHTML = pins.length
+      ? `<div class="common-pins-row"><span class="common-pins-head">⚡ 常用設置</span>${renderOptGroup(pins)}<span class="cp-hint">設定可調整</span></div>` : "";
+    if (pins.length) { wireSliders(pinsSel); wirePresets(pinsSel); wireChecksDefault(pinsSel); wireHeaders(pinsSel); wireCodeChips(pinsSel); wireSegBool(pinsSel); }
+  }
   wireSliders(gridSel);
   wirePresets(gridSel);
   wireChecksDefault(gridSel);
   wireHeaders(gridSel);
   wireCodeChips(gridSel);
+  wireSegBool(gridSel);
   $$(`${gridSel} .common-zone, ${gridSel} .adv-zone, ${gridSel} .danger-zone`).forEach(z => {
     const head = z.querySelector(".common-head, .adv-head, .danger-head"); if (!head) return;
     head.onclick = () => {
@@ -704,6 +788,17 @@ function wireHeaders(gridSel) {
     });
   });
 }
+// segmented boolean (e.g. HTTPS/HTTP): clicking a segment makes it active + fires a
+// change event so the command preview refreshes live (same as a checkbox/select).
+function wireSegBool(gridSel) {
+  $$(`${gridSel} .seg-bool`).forEach(box => {
+    box.querySelectorAll(".seg-mini").forEach(bt => bt.onclick = () => {
+      if (bt.disabled || bt.classList.contains("active")) return;
+      box.querySelectorAll(".seg-mini").forEach(x => x.classList.toggle("active", x === bt));
+      box.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  });
+}
 // status-code chips: click toggles the code in the sibling CSV input.
 function wireCodeChips(gridSel) {
   $$(`${gridSel} .code-chips`).forEach(box => {
@@ -727,9 +822,17 @@ function _syncCodeChips(gridSel) {
     box.querySelectorAll(".code-chip").forEach(ch => ch.classList.toggle("active", set.has(ch.dataset.code)));
   });
 }
+// composer grid (#optGrid) also has a pinned 常用設置 strip (#commonPins) that hosts
+// the REAL inputs for pinned keys -> always read/write it too, so a pinned option is
+// never silently dropped from the launch payload. Template editor (#teOptGrid) has none.
+function _optRoots(gridSel, togglesSel) {
+  const roots = [gridSel, togglesSel];
+  if (gridSel === "#optGrid") roots.push("#commonPins");
+  return roots.filter(Boolean).map(r => `${r} [data-optkey]`).join(", ");
+}
 function gatherOptions(gridSel, togglesSel) {
   const o = {};
-  $$(`${gridSel} [data-optkey], ${togglesSel} [data-optkey]`).forEach(el => {
+  $$(_optRoots(gridSel, togglesSel)).forEach(el => {
     const k = el.dataset.optkey;
     if (el.classList.contains("opt-checks")) {
       const join = el.dataset.join != null ? el.dataset.join : ",";
@@ -746,6 +849,9 @@ function gatherOptions(gridSel, togglesSel) {
         return n ? (n + ": " + v) : "";
       }).filter(Boolean);
       if (rows.length) o[k] = rows.join("\n");   // "Name: Value\n..." -> driver turns \n into literal
+    } else if (el.classList.contains("seg-bool")) {
+      const on = el.querySelector(".seg-mini.active");   // segmented boolean -> store explicitly (both states)
+      o[k] = on ? on.dataset.on === "1" : (el.dataset.defon === "1");
     } else if (el.type === "checkbox") {
       if (el.dataset.defon === "1") o[k] = el.checked;   // default-on: store true/false explicitly
       else if (el.checked) o[k] = true;
@@ -756,7 +862,7 @@ function gatherOptions(gridSel, togglesSel) {
 }
 function applyOptions(o, gridSel, togglesSel) {
   o = o || {};
-  $$(`${gridSel} [data-optkey], ${togglesSel} [data-optkey]`).forEach(el => {
+  $$(_optRoots(gridSel, togglesSel)).forEach(el => {
     const k = el.dataset.optkey;
     if (el.classList.contains("opt-checks")) {
       const join = el.dataset.join != null ? el.dataset.join : ",";
@@ -775,12 +881,20 @@ function applyOptions(o, gridSel, togglesSel) {
       });
       return;
     }
+    if (el.classList.contains("seg-bool")) {
+      const val = (k in o) ? !!o[k] : (el.dataset.defon === "1");
+      el.querySelectorAll(".seg-mini").forEach(bt => bt.classList.toggle("active", (bt.dataset.on === "1") === val));
+      return;
+    }
     if (el.type === "checkbox") el.checked = (k in o) ? !!o[k] : (el.dataset.defon === "1");
     else el.value = (k in o && o[k] != null) ? o[k] : "";
   });
   wireSliders(gridSel);   // re-sync slider positions after applying values
   _syncCodeChips(gridSel);   // reflect applied status-code values on the chips
   _revealFilledZones(gridSel);   // never hide an applied 進階/危險 value behind a collapse
+  if (gridSel === "#optGrid" && $("#commonPins")) {   // pinned strip has its own sliders/chips
+    wireSliders("#commonPins"); _syncCodeChips("#commonPins");
+  }
 }
 // expand any collapsed 進階/危險 section that ended up holding a non-default value,
 // so options loaded from a template / reconfigure are visible, not silently hidden.
@@ -861,8 +975,11 @@ function setProject(pid) {
 function requireProject() { if (state.projectId == null) { toast("請先建立並選擇一個專案", "err"); showProjectsView(true); return false; } return true; }
 
 function showProjectsView(firstRun) {
+  void firstRun;   // 專案總覽 no longer has a 返回儀表板 button (it's the top-level entry)
+  // remember WHERE we are for this tab session so F5 restores it (a fresh tab has no
+  // sessionStorage -> lands on the picker, per "打開首頁 = 選擇專案頁").
+  try { sessionStorage.setItem("viewMode", "projects"); } catch (e) {}
   setView("projects");
-  $("#projectsBackBtn").classList.toggle("hidden", !!firstRun && state.projectId == null);
   window.scrollTo(0, 0);
   renderProjectsList();
 }
@@ -1180,13 +1297,13 @@ function selectedTool() { const el = $('input[name="tool"]:checked'); return el 
 function _applyComposeDefaults() {
   const s = state.settings || {};
   let tool = s.default_tool; if (!SCHEMAS[tool]) tool = "sqlmap";
-  state.scanMode = (s.default_scan_mode === "basic") ? "basic" : "advanced";
+  state.scanMode = ["basic", "custom"].includes(s.default_scan_mode) ? s.default_scan_mode : "advanced";
   selectTool(tool, { autoDefault: true });   // selects tool + applies is_default template + setScanMode
 }
 function selectTool(tool, opts) {
   opts = opts || {};
   const radio = $(`input[name="tool"][value="${tool}"]`); if (radio) radio.checked = true;
-  renderOptions(tool, "#optGrid", "#optToggles", "#optToolLabel");
+  renderOptions(tool, "#optGrid", "#optToggles", "#optToolLabel", "#commonPins");
   const _ot = $("#optionsTitle"); if (_ot) _ot.textContent = "6 · 掃描選項(" + tool + ")";   // tool name in the card title
   $("#toolOptions").classList.remove("hidden");
   const _composed = !!state.parsed;   // mode / template / options / footer only once a request is parsed
@@ -1208,23 +1325,38 @@ function selectTool(tool, opts) {
 // filtered to just that template's settings and shown READ-ONLY. gatherOptions still
 // reads the DOM either way, so the launch payload is identical -- one component, no drift.
 function setScanMode(mode) {
-  state.scanMode = (mode === "basic") ? "basic" : "advanced";
+  state.scanMode = (mode === "basic") ? "basic" : (mode === "custom") ? "custom" : "advanced";
   $$("#modeCard .seg-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === state.scanMode));
-  const oc = $("#optionsCard"); if (oc) oc.classList.toggle("mode-basic", state.scanMode === "basic");
-  const bh = $("#basicHint"); if (bh) bh.classList.toggle("hidden", state.scanMode !== "basic");
-  const mh = $("#modeHint"); if (mh) mh.textContent = state.scanMode === "basic"
-    ? "無腦套用範本"
-    : "自由調整所有掃描選項";
+  const basic = state.scanMode === "basic", custom = state.scanMode === "custom";
+  // 全自訂:no option controls -> hide template + options + the pinned 常用設置 strip and show the
+  // free-flags card. _composeOpts() then sends ONLY the typed flags, bypassing the grid entirely.
+  const shown = !!state.parsed && !!selectedTool();
+  $("#customCard").classList.toggle("hidden", !(shown && custom));
+  $("#templateCard").classList.toggle("hidden", !(shown && !custom));
+  $("#optionsCard").classList.toggle("hidden", !(shown && !custom));
+  $("#composeFooter").classList.toggle("custom-mode", custom);   // CSS hides the 常用設置 strip
+  const oc = $("#optionsCard"); if (oc) oc.classList.toggle("mode-basic", basic);
+  const bh = $("#basicHint"); if (bh) bh.classList.toggle("hidden", !basic);
+  const mh = $("#modeHint"); if (mh) mh.textContent = custom ? "自由輸入指令,不需選項按鈕"
+    : basic ? "無腦套用範本" : "自由調整所有掃描選項";
   // 「不使用範本」is an advanced-only escape hatch: basic mode always needs a template
   const noneBtn = $("#templateChips .tpl-none");
-  if (noneBtn) noneBtn.classList.toggle("hidden", state.scanMode === "basic");
-  if (state.scanMode === "basic" && !$("#templateChips .tpl-chip.active:not(.tpl-none)")) {
+  if (noneBtn) noneBtn.classList.toggle("hidden", basic);
+  if (basic && !$("#templateChips .tpl-chip.active:not(.tpl-none)")) {
     const list = _sortByTplOrder((state.templates || []).filter(t => t.data && t.data.tool === selectedTool()), selectedTool());
     const def = list.find(t => t.is_default) || list[0];
     if (def) applyTemplateById(def.id, true);   // auto-pick so basic never shows an empty grid
   }
-  _applyModeToGrid();
+  if (!custom) _applyModeToGrid();
   updateCmdPreview();
+}
+// effective options for preview/launch: 全自訂 bypasses the grid and sends only the user's typed
+// flags (as extra_flags); basic/advanced read the option controls as usual.
+function _composeOpts() {
+  if (state.scanMode === "custom") {
+    return { extra_flags: (($("#customFlags") && $("#customFlags").value) || "").trim() };
+  }
+  return gatherOptions("#optGrid", "#optToggles");
 }
 function _applyModeToGrid() {
   const basic = state.scanMode === "basic";
@@ -1238,7 +1370,7 @@ function _applyModeToGrid() {
   const keys = new Set();
   Object.keys(tplOpts).forEach(k => {
     const v = tplOpts[k];
-    const el = $(`#optGrid [data-optkey="${k}"], #optToggles [data-optkey="${k}"]`);
+    const el = $(`#optGrid [data-optkey="${k}"], #optToggles [data-optkey="${k}"], #commonPins [data-optkey="${k}"]`);
     if (!el) return;
     if (el.classList.contains("opt-checks")) {
       if (v != null && String(v) !== "" && String(v) !== (el.dataset.def || "")) keys.add(k);
@@ -1250,10 +1382,15 @@ function _applyModeToGrid() {
       keys.add(k);
     }
   });
-  $$("#optGrid [data-optkey], #optToggles [data-optkey]").forEach(el => {
+  $$("#optGrid [data-optkey], #optToggles [data-optkey], #commonPins [data-optkey]").forEach(el => {
+    const k = el.dataset.optkey;
+    const keepEditable = BASIC_EDITABLE.includes(k);   // stays live even in basic mode
     const row = el.closest(".opt-row") || el.closest(".check") || el;
-    if (row.classList) row.classList.toggle("basic-hidden", basic && !keys.has(el.dataset.optkey));
-    (row.querySelectorAll ? [...row.querySelectorAll("input,select,textarea,button")] : [el]).forEach(i => { i.disabled = basic; });
+    if (row.classList) {
+      row.classList.toggle("basic-hidden", basic && !keys.has(k) && !keepEditable);
+      row.classList.toggle("basic-editable", basic && keepEditable);
+    }
+    (row.querySelectorAll ? [...row.querySelectorAll("input,select,textarea,button")] : [el]).forEach(i => { i.disabled = basic && !keepEditable; });
   });
   // hide the 進階 sub-headers (請求控制 / 認證·CSRF / 列舉 / 其他 ...) that end up with no
   // visible field. They are FLAT siblings interleaved with the field rows, so walk forward
@@ -1316,7 +1453,7 @@ function populateTemplateDropdown(tool) {
 // 「不使用範本」: drop any applied template and start from the tool's default options
 function clearTemplate() {
   const tool = selectedTool(); if (!tool) return;
-  renderOptions(tool, "#optGrid", "#optToggles", "#optToolLabel");
+  renderOptions(tool, "#optGrid", "#optToggles", "#optToolLabel", "#commonPins");
   markActiveTplChip(0);
   _applyModeToGrid();
   updateCmdPreview();
@@ -1359,6 +1496,8 @@ const CMD_FLAG_KEY = {
 // store_true flags carry no value token -> don't swallow the following token
 const CMD_BARE = new Set(["--force-ssl", "--random-agent", "--text-only", "--banner", "--current-user",
   "--current-db", "--hostname", "--dbs", "--is-dba", "--dump", "--dump-all", "--passwords"]);
+// key -> flag (reverse of CMD_FLAG_KEY), for the grey "ghost" preview of pinned-but-unset options
+const KEY_CMD_FLAG = Object.fromEntries(Object.entries(CMD_FLAG_KEY).map(([f, k]) => [k, f]));
 function _tokenizeCmd(s) {   // split on spaces, respecting the double-quotes display_cmd emits
   const toks = []; let cur = "", q = false;
   for (let i = 0; i < s.length; i++) {
@@ -1371,7 +1510,10 @@ function _tokenizeCmd(s) {   // split on spaces, respecting the double-quotes di
   if (cur !== "") toks.push(cur);
   return toks;
 }
-function _cmdHtml(cmd) {
+// ghostFlag (optional): render THAT flag's token greyed -- used on hover to preview where an
+// unset option's flag would land. Because the string comes from the real build_args (a what-if
+// preview), the ghost sits at the EXACT position the flag will occupy once enabled.
+function _cmdHtml(cmd, ghostFlag) {
   const toks = _tokenizeCmd(cmd), out = [];
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
@@ -1382,7 +1524,9 @@ function _cmdHtml(cmd) {
       if (!t.includes("=") && !CMD_BARE.has(flag) && i + 1 < toks.length && !toks[i + 1].startsWith("-")) {
         text = t + " " + toks[i + 1]; i++;   // ghauri space-form: group "--level 3"
       }
-      out.push(`<span class="cmd-tok" data-optkey="${esc(key)}" title="點我跳到此設定">${esc(text)}</span>`);
+      const ghost = flag === ghostFlag ? " cmd-ghost" : "";
+      const title = ghost ? "勾選後會加入此參數(此處就是實際插入位置)" : "點我跳到此設定";
+      out.push(`<span class="cmd-tok${ghost}" data-optkey="${esc(key)}" title="${title}">${esc(text)}</span>`);
     } else {
       out.push(esc(t));
     }
@@ -1391,7 +1535,7 @@ function _cmdHtml(cmd) {
 }
 // scroll a 掃描選項 field into view + briefly highlight it (expand its zone if collapsed)
 function flashOption(key) {
-  const el = $(`#optGrid [data-optkey="${key}"], #optToggles [data-optkey="${key}"]`);
+  const el = $(`#optGrid [data-optkey="${key}"], #optToggles [data-optkey="${key}"], #commonPins [data-optkey="${key}"]`);
   if (!el) return;
   const sec = el.closest(".opt-sec");
   if (sec && sec.classList.contains("collapsed")) { sec.classList.remove("collapsed"); const car = sec.querySelector(".caret"); if (car) car.textContent = "▾"; }
@@ -1407,19 +1551,27 @@ function _wireCmdOptionLink() {
     cp._linked = true;
     cp.addEventListener("click", e => { const tk = e.target.closest(".cmd-tok"); if (tk) flashOption(tk.dataset.optkey); });
   }
-  const grid = $("#optGrid");
-  if (grid && !grid._linked) {
-    grid._linked = true;
-    let _hlKey = null;   // hovering any part of an option row glows its command token(s)
-    const setHl = (key) => {
-      if (key === _hlKey) return;
-      if (_hlKey) $$(`#cmdPreview .cmd-tok[data-optkey="${_hlKey}"]`).forEach(t => t.classList.remove("cmd-tok-hl"));
-      _hlKey = key;
-      if (key) $$(`#cmdPreview .cmd-tok[data-optkey="${key}"]`).forEach(t => t.classList.add("cmd-tok-hl"));
-    };
-    grid.addEventListener("mouseover", e => { const row = e.target.closest(".opt-row, .check"); const el = row && row.querySelector("[data-optkey]"); setHl(el ? el.dataset.optkey : null); });
-    grid.addEventListener("mouseleave", () => setHl(null));
-  }
+  let _hlKey = null;   // hovering any part of an option row glows its command token(s)
+  const setHl = (key) => {
+    if (key === _hlKey) return;
+    if (_hlKey) $$(`#cmdPreview .cmd-tok[data-optkey="${_hlKey}"]`).forEach(t => t.classList.remove("cmd-tok-hl"));
+    _hlKey = key;
+    if (key) $$(`#cmdPreview .cmd-tok[data-optkey="${key}"]`).forEach(t => t.classList.add("cmd-tok-hl"));
+  };
+  // wire the same hover→highlight on both the options card AND the pinned 常用設置 strip
+  ["#optGrid", "#commonPins"].forEach(sel => {
+    const root = $(sel);
+    if (root && !root._linked) {
+      root._linked = true;
+      root.addEventListener("mouseover", e => {
+        const row = e.target.closest(".opt-row, .check"); const el = row && row.querySelector("[data-optkey]");
+        const key = el ? el.dataset.optkey : null;
+        setHl(key);
+        _hoverPreview(key);   // unset toggle -> preview its flag (greyed) at the real position
+      });
+      root.addEventListener("mouseleave", () => { setHl(null); _clearHoverGhost(); });
+    }
+  });
 }
 // SINGLE SOURCE OF TRUTH: the backend builds the command with the SAME build_args()
 // the launcher runs (POST /api/preview), so the preview can't drift from the real
@@ -1437,7 +1589,7 @@ let _cmdPreviewTimer = null, _cmdPreviewSeq = 0;
 function updateCmdPreview() {
   const el = $("#cmdPreview");
   const tool = selectedTool();
-  const opts = tool ? gatherOptions("#optGrid", "#optToggles") : {};
+  const opts = tool ? _composeOpts() : {};
   // risk line stays LOCAL + instant; only the command string comes from the backend
   const ri = $("#riskIndicator");
   if (ri) {
@@ -1452,6 +1604,18 @@ function updateCmdPreview() {
       }
     }
   }
+  // ghauri applies http/https by REWRITING the request (Referer), not a CLI flag, so its
+  // command doesn't visibly change when you flip HTTPS/HTTP -- spell that out so it's not
+  // mistaken for "the toggle does nothing". sqlmap shows --force-ssl itself, so no note.
+  const note = $("#cmdSchemeNote");
+  if (note) {
+    if (tool === "ghauri" && state.parsed) {
+      note.textContent = opts.force_ssl
+        ? "ghauri:以 HTTPS 送出(預設,指令不需旗標)"
+        : "ghauri:以 HTTP 送出 — 會在請求注入 Referer: http://…(ghauri 無 --force-ssl 旗標,靠此降級)";
+      note.classList.remove("hidden");
+    } else { note.classList.add("hidden"); }
+  }
   if (!el) return;
   if (!tool || !state.parsed) { el.textContent = "選擇工具後,這裡會顯示實際會跑的指令。"; return; }
   // debounce rapid edits into ONE call; keep showing the last value until it returns
@@ -1460,9 +1624,39 @@ function updateCmdPreview() {
   _cmdPreviewTimer = setTimeout(async () => {
     const cmd = await _fetchPreviewCmd(tool, opts);
     if (seq !== _cmdPreviewSeq) return;   // ignore a superseded response
-    if (cmd && cmd[0] !== "(") el.innerHTML = _cmdHtml(cmd);   // real command -> clickable, linkable tokens
+    _lastPreviewCmd = cmd;
+    if (_hoverGhostKey) return;            // a hover ghost is showing -> don't clobber it
+    if (cmd && cmd[0] !== "(") el.innerHTML = _cmdHtml(cmd);   // real, clickable tokens (no ghosts here)
     else el.textContent = cmd;                                 // error/placeholder -> plain text
   }, 160);
+}
+// Hover ghost: only while the cursor is on an UNSET toggle option, preview the flag it would
+// add -- rendered greyed AT ITS REAL POSITION (we fetch the what-if command from the same
+// build_args, so the preview position == the launch position). No always-on clutter.
+let _hoverGhostKey = null, _hoverGhostSeq = 0, _lastPreviewCmd = "";
+async function _hoverPreview(key) {
+  if (key === _hoverGhostKey) return;
+  const el = key && $(`#optGrid [data-optkey="${key}"], #commonPins [data-optkey="${key}"]`);
+  const flag = key && KEY_CMD_FLAG[key];
+  // only bare store_true toggles that are currently OFF get a hover ghost (a value field has
+  // nothing to preview without a value; a segbool/HTTPS-HTTP is an explicit choice, not "unset").
+  const offToggle = el && el.type === "checkbox" && !el.checked && flag && CMD_BARE.has(flag);
+  if (!offToggle) { if (_hoverGhostKey) _clearHoverGhost(); return; }
+  _hoverGhostKey = key;
+  const seq = ++_hoverGhostSeq;
+  const tool = selectedTool(); if (!tool || !state.parsed) return;
+  const opts = gatherOptions("#optGrid", "#optToggles");
+  const cmd = await _fetchPreviewCmd(tool, { ...opts, [key]: true });
+  if (seq !== _hoverGhostSeq || _hoverGhostKey !== key) return;   // moved on / superseded
+  const cp = $("#cmdPreview");
+  if (cp && cmd && cmd[0] !== "(") cp.innerHTML = _cmdHtml(cmd, flag);
+}
+function _clearHoverGhost() {
+  if (_hoverGhostKey == null) return;
+  _hoverGhostKey = null; _hoverGhostSeq++;
+  const cp = $("#cmdPreview");   // restore the real command instantly (no refetch)
+  if (cp && _lastPreviewCmd && _lastPreviewCmd[0] !== "(") cp.innerHTML = _cmdHtml(_lastPreviewCmd);
+  else updateCmdPreview();
 }
 
 // ===== launch =============================================================
@@ -1512,7 +1706,7 @@ async function launch() {
   if (state.params.length && !state.params.some(p => p.selected)) {
     toast("請至少勾選一個參數再開始掃描", "err"); return;
   }
-  const opts = gatherOptions("#optGrid", "#optToggles");
+  const opts = _composeOpts();
   const proj = (state.projects || []).find(p => p.id === state.projectId) || {};
   // ALWAYS confirm before running -- never launch on a single click.
   const risk = assessRisk(tool, opts);
@@ -1720,7 +1914,12 @@ function buildPathTree(scans, current) {
   const root = (host) => (hosts[host] = hosts[host] || _tnode(host, ""));
   const terminal = (host, path) => {
     let node = root(host), acc = "";
-    for (const seg of path.split("/").filter(x => x !== "")) {
+    const segs = path.split("/").filter(x => x !== "");
+    if (!segs.length) {   // site root ("/") -> a dedicated "/" child node, not the host row itself,
+      if (!node.children.has("/")) node.children.set("/", _tnode("/", "/"));   // so root scans + the "目前" placeholder have a real home
+      return node.children.get("/");
+    }
+    for (const seg of segs) {
       acc += "/" + seg;
       if (!node.children.has(seg)) node.children.set(seg, _tnode(seg, acc));
       node = node.children.get(seg);
@@ -2091,7 +2290,7 @@ async function reconfigureFromScan(s) {
   const droppedOpts = [];
   for (const k in opts) {
     if (k === "restrict_ip") continue;   // no longer a composer option (project memo)
-    const el = $(`#optGrid [data-optkey="${k}"]`) || $(`#optToggles [data-optkey="${k}"]`);
+    const el = $(`#optGrid [data-optkey="${k}"]`) || $(`#optToggles [data-optkey="${k}"]`) || $(`#commonPins [data-optkey="${k}"]`);
     let same;
     if (el && el.classList && el.classList.contains("opt-checks")) {
       // checkbox groups: compare as a SET (order/casing of a legacy free-text
@@ -2185,9 +2384,63 @@ function _selectionInside(el) {
   return (sel.anchorNode && el.contains(sel.anchorNode)) || (sel.focusNode && el.contains(sel.focusNode));
 }
 // render the log with the verdict block + its evidence lines highlighted
+// ---- raw-output views: our highlighting vs the tool's own terminal colours ----------
+const _ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;   // strip SGR + other CSI escapes (ghauri emits colour)
+function _stripAnsi(s) { return (s || "").replace(_ANSI_RE, ""); }
+// terminal-style palette (concrete hex so it survives both the DOM view and the PNG raster)
+const TERM_HEX = { info: "#4ec9b0", warning: "#e5c07b", error: "#e06c75", critical: "#ff6b6b",
+  payload: "#c586c0", debug: "#7f848e", verdict: "#61afef", def: "#d4d4d4" };
+const HL_HEX = { hit: "#e5c07b", enum: "#4ec9b0", verdict: "#61afef", def: "#d4d4d4" };
+function _termKey(line) {
+  if (line.includes("【判定】")) return "verdict";
+  const m = line.match(/\[(INFO|WARNING|ERROR|CRITICAL|PAYLOAD|DEBUG)\]/);
+  return m ? m[1].toLowerCase() : "def";
+}
+// which raw lines produced a PARSED enumeration value (banner / user / db / ...), so both
+// views can light them up. Both tools print these the same way.
+function _enumPats(scan) {
+  const pats = [];
+  try {
+    const f = JSON.parse((scan && scan.result_json) || "{}") || {};
+    if (f.banner) pats.push("banner:");
+    if (f.current_user) pats.push("current user:");
+    if (f.current_db) pats.push("current database:", "current db:");
+    if (f.hostname) pats.push("hostname:");
+    if (f.is_dba != null) pats.push("current user is dba:");
+    if (f.databases_count != null) pats.push("available databases [");
+  } catch (e) { /* slim scan / no result_json */ }
+  return pats;
+}
+function _hlKey(line, lows, enumPats) {
+  if (line.includes("【判定】")) return "verdict";
+  const low = line.toLowerCase();
+  if (lows.some(m => low.includes(m))) return "hit";
+  if (enumPats.length && enumPats.some(p => low.includes(p))) return "enum";
+  return "def";
+}
+function _effectiveLogView() { return state.logView || ((state.settings && state.settings.default_log_view === "original") ? "original" : "highlighted"); }
+// "純原始輸出": drop the lines WE add (append_log wrappers + the 【判定】 block) and strip our
+// timestamp prefix, so the view is just what the tool itself printed -- but KEEP the 指令 line.
+const _OUR_WRAP_RE = /^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\]\s+(?:===.*(?:掃描開始|掃描結束)|目標:|備忘・|==\s*使用者中止)/;
+const _OUR_TS_RE = /^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\]\s?/;
+function _filterPureRaw(text) {
+  const out = [];
+  for (const line of (text || "").split(/\r?\n/)) {
+    if (line.includes("【判定】")) break;         // our verdict block is appended last -> stop here
+    if (_OUR_WRAP_RE.test(line)) continue;         // drop 開始/結束/目標/備忘/中止 wrapper lines
+    out.push(line.replace(_OUR_TS_RE, ""));        // strip our timestamp; keep the tool line (incl 指令:)
+  }
+  while (out.length && out[out.length - 1].trim() === "") out.pop();   // trim trailing blanks
+  return out.join("\n");
+}
+function _syncLogViewUI(mode) {
+  $$("#logViewSeg .seg-mini").forEach(b => b.classList.toggle("active", b.dataset.logview === mode));
+  const lbl = $("#logLabel"); if (lbl) lbl.textContent = mode === "original" ? "工具原始輸出(終端配色)" : "判定依據已高亮";
+}
 function _renderDetailLog() {
-  const text = state.detailCache || "";
-  const { items, markers } = _parseVerdict(text);
+  const full = _stripAnsi(state.detailCache || "");   // drop colour escapes so nothing shows as garbage
+  const { items, markers } = _parseVerdict(full);     // markers come from the FULL log (verdict block)
+  const text = state.pureRaw ? _filterPureRaw(full) : full;   // but DISPLAY may hide our wrappers
   const scan = state.detailScan || (state.allScans || []).find(x => x.id === state.detailId);
   const vp = $("#sdVerdict"); if (vp) vp.innerHTML = _wafNoteHtml();                       // WAF caveat
   const pv = $("#sdParams"); if (pv && scan) pv.innerHTML = _paramsVerdictHtml(scan);       // verdict = param list, w/ fresh evidence
@@ -2197,22 +2450,15 @@ function _renderDetailLog() {
   // live inside the log -- the next poll re-renders once they release.
   if (_selectionInside(view)) return;
   const atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+  const mode = _effectiveLogView();
+  _syncLogViewUI(mode);
   const lows = markers.map(m => m.toLowerCase()).filter(Boolean);
-  // also light up the raw lines that produced a PARSED enumeration value (banner /
-  // current user / db / hostname / is-DBA / databases) -- both tools print these the
-  // same way ("banner: 'X'", "current user is DBA: True", "available databases [N]").
-  const enumPats = [];
-  try {
-    const f = JSON.parse((scan && scan.result_json) || "{}") || {};
-    if (f.banner) enumPats.push("banner:");
-    if (f.current_user) enumPats.push("current user:");
-    if (f.current_db) enumPats.push("current database:", "current db:");
-    if (f.hostname) enumPats.push("hostname:");
-    if (f.is_dba != null) enumPats.push("current user is dba:");
-    if (f.databases_count != null) enumPats.push("available databases [");
-  } catch (e) { /* slim scan / no result_json -> nothing to add */ }
+  const enumPats = _enumPats(scan);
   view.innerHTML = text.split(/\r?\n/).map(line => {
     const e = esc(line);
+    if (mode === "original") {   // terminal-style: colour by log level, no verdict highlighting
+      return `<span style="color:${TERM_HEX[_termKey(line)]}">${e}</span>`;
+    }
     if (line.includes("【判定】")) return `<span class="log-verdict">${e}</span>`;
     const low = line.toLowerCase();
     if (lows.some(m => low.includes(m))) return `<mark class="log-hit">${e}</mark>`;
@@ -2220,6 +2466,75 @@ function _renderDetailLog() {
     return e;
   }).join("\n");
   if (atBottom) view.scrollTop = view.scrollHeight;
+}
+// ===== 匯出輸出圖片 (screenshot) =========================================
+let _shotDrag = false, _shotExcludeTo = false;
+function openShotModal() {
+  if (!(state.detailCache || "").trim()) { toast("尚無輸出可匯出", "err"); return; }
+  const mode = _effectiveLogView();
+  $("#shotTitle").textContent = `匯出輸出圖片 · #${state.detailId} · ${mode === "original" ? "原始" : "高亮"}版`;
+  _buildShotLines(mode);
+  const cap = $("#shotCapture");
+  cap.contentEditable = "false"; cap.classList.remove("editing", "no-color");
+  $("#shotColor").checked = true; $("#shotEdit").classList.remove("active");
+  $("#shotHint").textContent = "拖曳可勾選/取消要放進圖片的行(灰掉的不會進圖片);右下角可拖曳調整寬度";
+  showModal("shotModal");
+}
+function _buildShotLines(mode) {
+  const full = _stripAnsi(state.detailCache || "");
+  const scan = state.detailScan || (state.allScans || []).find(x => x.id === state.detailId);
+  const { markers } = _parseVerdict(full);
+  const text = state.pureRaw ? _filterPureRaw(full) : full;   // match what the detail view shows
+  const lows = markers.map(m => m.toLowerCase()).filter(Boolean);
+  const enumPats = _enumPats(scan);
+  $("#shotCapture").innerHTML = text.split(/\r?\n/).map(line => {
+    const hex = mode === "original" ? TERM_HEX[_termKey(line)] : HL_HEX[_hlKey(line, lows, enumPats)];
+    return `<div class="shot-line" data-color="${hex}" style="color:${hex}">${esc(line) || "&nbsp;"}</div>`;
+  }).join("");
+}
+// render ONE tile (a slice of lines) to an <img>. Tiling matters: a single very tall
+// foreignObject silently drops middle content in Chrome, so we paint the log in chunks
+// and stack them onto the final canvas -> nothing goes missing however long the log is.
+async function _renderTileImg(body, contentWidth, lineStyle) {
+  const meas = document.createElement("div");
+  meas.style.cssText = `position:absolute;left:-99999px;top:0;width:${contentWidth}px;${lineStyle}`;
+  meas.innerHTML = body; document.body.appendChild(meas);
+  const h = Math.max(1, Math.ceil(meas.getBoundingClientRect().height)); document.body.removeChild(meas);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${contentWidth}" height="${h}"><foreignObject x="0" y="0" width="${contentWidth}" height="${h}"><div xmlns="http://www.w3.org/1999/xhtml" style="width:${contentWidth}px;${lineStyle}">${body}</div></foreignObject></svg>`;
+  const img = new Image();
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  await img.decode();
+  return { img, h };
+}
+async function _shotToPng() {
+  const cap = $("#shotCapture");
+  const colored = $("#shotColor").checked;
+  const kids = [...cap.children].filter(el => !(el.classList && el.classList.contains("shot-excluded")));
+  if (!kids.length) { toast("沒有選任何行", "err"); return null; }
+  const pad = 16, fs = 12.5, lh = 1.5;
+  const width = Math.round(Math.min(Math.max(cap.clientWidth || 640, 320), 2400));   // honours the dragged width
+  const contentWidth = width - pad * 2;
+  const lineStyle = `box-sizing:border-box;font-family:Consolas,'Courier New',monospace;font-size:${fs}px;line-height:${lh};white-space:pre-wrap;word-break:break-word`;
+  const lineHtml = el => {
+    const color = colored ? (el.dataset.color || "#d4d4d4") : "#d4d4d4";
+    return `<div style="color:${color};white-space:pre-wrap;word-break:break-word;min-height:1.5em">${esc(el.textContent) || "&#160;"}</div>`;
+  };
+  const CHUNK = 25, tiles = [];
+  try {
+    for (let i = 0; i < kids.length; i += CHUNK) {
+      tiles.push(await _renderTileImg(kids.slice(i, i + CHUNK).map(lineHtml).join(""), contentWidth, lineStyle));
+    }
+  } catch (e) { toast("圖片產生失敗:" + (e.message || e), "err"); return null; }
+  const totalH = tiles.reduce((s, t) => s + t.h, 0) + pad * 2;
+  let scale = 2;
+  if (Math.max(width, totalH) * scale > 30000) scale = 1;   // keep under Chrome's canvas dimension cap
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * scale); canvas.height = Math.round(totalH * scale);
+  const ctx = canvas.getContext("2d"); ctx.scale(scale, scale);
+  ctx.fillStyle = "#1e1e1e"; ctx.fillRect(0, 0, width, totalH);
+  let y = pad;
+  for (const t of tiles) { ctx.drawImage(t.img, pad, y, contentWidth, t.h); y += t.h; }
+  try { return canvas.toDataURL("image/png"); } catch (e) { toast("圖片轉檔失敗:" + (e.message || e), "err"); return null; }
 }
 async function stopScan(id) {
   try { await api(`/api/scans/${id}/stop`, "POST"); toast("已送出中止(實際殺掉程序後才會標記 killed)", "ok"); }
@@ -2294,6 +2609,7 @@ function playViewEnter() {
 }
 function showDashboard() {
   setView("dashboard");
+  try { sessionStorage.setItem("viewMode", "dashboard"); } catch (e) {}   // F5 stays in the project
   const _t = selectedTool(); if (_t) populateTemplateDropdown(_t);   // refresh chips (order may have changed in settings)
 }
 function showSettings(tab) {
@@ -2319,10 +2635,23 @@ async function loadGeneralSettings() {
   $("#setIpRefresh").value = state.settings.ip_refresh_seconds;
   $("#setPublicIp").checked = !!state.settings.public_ip_lookup; $("#setAutoOpen").checked = !!state.settings.auto_open_browser;
   $("#setDefaultTool").value = state.settings.default_tool || "sqlmap";
-  $("#setDefaultMode").value = state.settings.default_scan_mode === "basic" ? "basic" : "advanced";
+  $("#setDefaultMode").value = ["basic", "custom"].includes(state.settings.default_scan_mode) ? state.settings.default_scan_mode : "advanced";
+  $("#setDefaultLogView").value = state.settings.default_log_view === "original" ? "original" : "highlighted";
+  renderPinChooser();
+}
+// 常用設置 chooser: one checkbox per pinnable (non-danger) option, tool-tagged.
+function renderPinChooser() {
+  const box = $("#pinChooser"); if (!box) return;
+  const pinned = new Set(_pinnedKeys());
+  box.innerHTML = _pinCatalog().map(o => {
+    const badge = o.tools.length === 1 ? `<span class="pin-tool-badge">${esc(o.tools[0])}</span>` : "";
+    return `<label class="pin-opt"><input type="checkbox" data-pinkey="${esc(o.key)}"${pinned.has(o.key) ? " checked" : ""}><span class="pin-opt-name">${esc(o.label)}</span>${badge}</label>`;
+  }).join("");
 }
 async function saveGeneralSettings() {
   try {
+    const checked = new Set(Array.from(document.querySelectorAll("#pinChooser input[data-pinkey]:checked")).map(c => c.dataset.pinkey));
+    const pinned_common = PIN_ORDER.filter(k => checked.has(k));   // canonical order
     state.settings = await api("/api/settings", "POST", {
       max_concurrent: Number($("#setMax").value) || 3,
       ip_refresh_seconds: Number($("#setIpRefresh").value) || 60,
@@ -2330,11 +2659,24 @@ async function saveGeneralSettings() {
       public_ip_lookup: $("#setPublicIp").checked, auto_open_browser: $("#setAutoOpen").checked,
       default_tool: $("#setDefaultTool").value,
       default_scan_mode: $("#setDefaultMode").value,
+      default_log_view: $("#setDefaultLogView").value,
+      pinned_common,
     });
+    state.logView = null;   // let the new default take effect next time a detail renders
     setIpSeconds(state.settings.ip_refresh_seconds); doIpRefresh();
     applyScanRefresh();   // takes effect immediately, no restart
+    _reflowCommonPins();   // move options between the strip and the card per the new choice
     toast("已儲存(併發數變更需重啟,其餘即時生效)", "ok");
   } catch (e) { toast("儲存失敗:" + e.message, "err"); }
+}
+// re-lay the composer options for the current pin set, preserving the values already set.
+function _reflowCommonPins() {
+  const tool = selectedTool(); if (!tool || !$("#optGrid")) return;
+  const cur = gatherOptions("#optGrid", "#optToggles");   // reads card + strip
+  renderOptions(tool, "#optGrid", "#optToggles", "#optToolLabel", "#commonPins");
+  applyOptions(cur, "#optGrid", "#optToggles");           // writes card + strip
+  _applyModeToGrid();
+  updateCmdPreview();
 }
 
 // ----- rules (split into 全域 / 本專案 sub-tabs) -----
@@ -2662,7 +3004,7 @@ async function loadTemplates(applyLast) {
     let pref = (state.settings && state.settings.default_tool) || "";
     if (!SCHEMAS[pref]) { try { pref = localStorage.getItem("lastTool") || ""; } catch (e) {} }
     if (!SCHEMAS[pref]) pref = "sqlmap";
-    state.scanMode = (state.settings && state.settings.default_scan_mode === "basic") ? "basic" : "advanced";
+    state.scanMode = (state.settings && ["basic", "custom"].includes(state.settings.default_scan_mode)) ? state.settings.default_scan_mode : "advanced";
     selectTool(pref, { autoDefault: true });
   }
 }
@@ -2672,7 +3014,6 @@ function init() {
   restoreTabs(); renderComposeTabs(); applyTab(_activeTab());
   window.addEventListener("beforeunload", saveTabs);
   $("#projectsBtn").onclick = () => showProjectsView(false);
-  $("#projectsBackBtn").onclick = () => { if (state.projectId != null) showDashboard(); else toast("請先建立一個專案", "err"); };
   $("#openNewProjectBtn").onclick = openNewProject;
   $("#npCreate").onclick = createProjectEntry;
 
@@ -2691,10 +3032,13 @@ function init() {
   $$("[data-sel]").forEach(b => b.onclick = () => selectParams(b.dataset.sel));
   $$('input[name="tool"]').forEach(r => r.onchange = () => selectTool(r.value, { autoDefault: true }));
   $$("#modeCard .seg-btn").forEach(b => b.onclick = () => setScanMode(b.dataset.mode));
+  if ($("#customFlags")) $("#customFlags").addEventListener("input", updateCmdPreview);   // 全自訂 -> live command
   $("#optGrid").addEventListener("input", updateCmdPreview);      // live command preview
   $("#optGrid").addEventListener("change", updateCmdPreview);     // selects / checkbox groups
   $("#optToggles").addEventListener("change", updateCmdPreview);
   $("#optToggles").addEventListener("input", updateCmdPreview);   // danger-zone text fields live-update
+  $("#commonPins").addEventListener("input", updateCmdPreview);   // 常用設置 strip must ALSO update the command live
+  $("#commonPins").addEventListener("change", updateCmdPreview);  // (else a pinned toggle/select won't reflect until another event fires)
   $("#editTplLink").onclick = () => showSettings("templates");
 
   $("#settingsBtn").onclick = () => showSettings("general");
@@ -2722,11 +3066,60 @@ function init() {
   $$("[data-close]").forEach(b => b.onclick = closeModals);
   document.addEventListener("keydown", e => { if (e.key === "Escape") closeModals(); });
 
+  // raw-output view toggle (高亮 / 原始) + 純原始輸出 filter + 匯出圖片 modal
+  $$("#logViewSeg .seg-mini").forEach(b => b.onclick = () => { state.logView = b.dataset.logview; _renderDetailLog(); });
+  const _pure = $("#pureRawChk");
+  if (_pure) { _pure.checked = state.pureRaw; _pure.onchange = () => { state.pureRaw = _pure.checked; _renderDetailLog(); }; }
+  $("#shotBtn").onclick = openShotModal;
+  const _cap = $("#shotCapture");
+  if (_cap) {
+    _cap.addEventListener("mousedown", e => {
+      if (_cap.isContentEditable) return;                 // edit mode -> let text selection work
+      const line = e.target.closest(".shot-line"); if (!line) return;
+      _shotDrag = true; _shotExcludeTo = !line.classList.contains("shot-excluded");
+      line.classList.toggle("shot-excluded", _shotExcludeTo); e.preventDefault();
+    });
+    _cap.addEventListener("mouseover", e => {
+      if (!_shotDrag) return;
+      const line = e.target.closest(".shot-line"); if (line) line.classList.toggle("shot-excluded", _shotExcludeTo);
+    });
+    document.addEventListener("mouseup", () => { _shotDrag = false; });
+  }
+  $("#shotColor").onchange = () => $("#shotCapture").classList.toggle("no-color", !$("#shotColor").checked);
+  $("#shotAll").onclick = () => $$("#shotCapture .shot-line").forEach(l => l.classList.remove("shot-excluded"));
+  $("#shotNone").onclick = () => $$("#shotCapture .shot-line").forEach(l => l.classList.add("shot-excluded"));
+  $("#shotEdit").onclick = () => {
+    const cap = $("#shotCapture"); const on = cap.contentEditable !== "true";
+    cap.contentEditable = on ? "true" : "false";
+    cap.classList.toggle("editing", on); $("#shotEdit").classList.toggle("active", on);
+    $("#shotHint").textContent = on ? "編輯模式:直接改文字;改完可再關閉編輯去選行"
+                                    : "拖曳可勾選/取消要放進圖片的行(灰掉的不會進圖片);右下角可拖曳調整寬度";
+    if (on) cap.focus();
+  };
+  $("#shotDownload").onclick = async () => {
+    const url = await _shotToPng(); if (!url) return;
+    const a = document.createElement("a"); a.href = url; a.download = `scan_${state.detailId || "output"}.png`;
+    document.body.appendChild(a); a.click(); a.remove(); toast("已下載 PNG", "ok");
+  };
+  $("#shotCopy").onclick = async () => {
+    const url = await _shotToPng(); if (!url) return;
+    try {
+      const blob = await (await fetch(url)).blob();
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast("已複製到剪貼簿", "ok");
+    } catch (e) { toast("複製失敗(可改用下載):" + (e.message || e), "err"); }
+  };
   _wireCmdOptionLink();   // command <-> option cross-highlight (delegated, one-time)
-  // land on the PROJECT PICKER on open (don't auto-enter a project); last project stays
-  // remembered so the picker's back button + header still work.
-  loadProjects().then(ok => { if (ok) { loadScans(); loadTemplates(true); showProjectsView(false); } })
-    .catch(e => toast("載入失敗:" + (e && e.message || e) + " — 請確認後端已啟動,重新整理再試", "err"));
+  // A FRESH tab lands on the PROJECT PICKER (don't auto-enter). But an F5 while working
+  // INSIDE a project should stay there -> sessionStorage remembers the view for this tab
+  // (survives reload, empty on a brand-new tab). last project id stays in localStorage.
+  loadProjects().then(ok => {
+    if (!ok) return;   // no projects -> loadProjects already opened the new-project flow
+    loadScans(); loadTemplates(true);
+    let vm = null; try { vm = sessionStorage.getItem("viewMode"); } catch (e) {}
+    if (vm === "dashboard" && state.projectId != null) showDashboard();
+    else showProjectsView(false);
+  }).catch(e => toast("載入失敗:" + (e && e.message || e) + " — 請確認後端已啟動,重新整理再試", "err"));
   // settings: IP interval + configurable scan-refresh interval
   api("/api/settings").then(s => { state.settings = s; setIpSeconds(s.ip_refresh_seconds); applyScanRefresh(); }).catch(() => {});
   doIpRefresh(); refreshHealth();

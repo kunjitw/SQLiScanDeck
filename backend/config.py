@@ -94,6 +94,13 @@ DEFAULTS = {
     "auto_open_browser": True,
     "default_tool": "sqlmap", # which tool the composer pre-selects (sqlmap | ghauri)
     "default_scan_mode": "advanced",  # composer's default mode every time (advanced | basic)
+    # keys shown in the pinned "常用設置" quick strip above the command preview. Empty
+    # list is a valid explicit choice (hide the strip); the frontend supplies the default
+    # set when this key is absent. Persisted verbatim as a JSON list.
+    "pinned_common": ["force_ssl", "random_agent"],
+    # which raw-output view a scan detail opens on: "highlighted" (our verdict/enum
+    # highlighting) or "original" (terminal-style, tool's own log colours).
+    "default_log_view": "highlighted",
 }
 
 
