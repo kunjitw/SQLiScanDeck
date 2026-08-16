@@ -86,7 +86,8 @@
 - **無內建認證**:預設只綁 `127.0.0.1`;若改綁 `0.0.0.0` 對外,請自行加存取控制。含真實請求的欄位(原始請求、分頁內容)只在**回環位址**回傳。
 - **`data/` 不要上傳**(含真實請求 / cookie / log / 分頁);`.gitignore` 已排除 `data/`、`python/`、`tools/`。
 - **`testlab/` 只能本機**:兩個靶機都故意有洞,**絕不可對外曝露**。
-- wrapper 程式碼採 **MIT**([`LICENSE`](LICENSE));編排 [sqlmap](https://github.com/sqlmapproject/sqlmap)(GPLv2)與 [ghauri](https://github.com/r0oth3x49/ghauri),以獨立子程序執行、由 `bootstrap` 從官方取得。
+- **授權採 [GNU AGPL-3.0](LICENSE)**(著作權 © 2026 kunjitw):可自由使用、研究、修改,但**任何改作 / 散布 / 架成網路服務,都必須同樣以 AGPL 開源並保留署名** —— 公司無法把它 closed-source 變成自己的產品。
+- 本專案**編排** [sqlmap](https://github.com/sqlmapproject/sqlmap)(GPLv2)與 [ghauri](https://github.com/r0oth3x49/ghauri)(MIT),以**獨立子程序**執行、由 `bootstrap` 從官方取得、**不隨附於本專案**,各自依其原授權。
 
 ---
 
@@ -194,6 +195,8 @@ data/      執行時建立:DB、logs/、requests/、settings.json(.gitignore)
 
 **Notable** — auto param extraction + noise filters · pinned quick settings (**HTTPS/HTTP toggle**, random UA) above the command · Basic (template-only) vs Advanced mode with an *identical* launch payload · **edit-the-command** mode that reverse-parses back into options · command preview built from the **same** code the launcher runs (no drift) · concurrent scans with a colour board + live log · dual log view (highlighted / raw) with **PNG export** · evidence-based verdicts · **force-stop & delete** · dedup via endpoint signatures (*display only; the engine tests your original request*) · VSCode-style path tree with outcome filters · projects with **DB-persisted tabs** (survive a machine move) · per-tool templates · dark/light theme.
 
-**Security** — authorized testing only (unauthorized scanning may be illegal); local tool with **no built-in auth**, loopback-gated sensitive fields; never publish `data/`; keep `testlab/` bound to loopback. Wrapper code is **MIT**; it orchestrates sqlmap (GPLv2) and ghauri as separate processes.
+**Security** — authorized testing only (unauthorized scanning may be illegal); local tool with **no built-in auth**, loopback-gated sensitive fields; never publish `data/`; keep `testlab/` bound to loopback.
+
+**License** — **GNU AGPL-3.0** (© 2026 kunjitw): free to use, study, and modify, but any modified / distributed / network-served version must also be released under AGPL with attribution — companies cannot turn it into a closed-source product. It orchestrates sqlmap (GPLv2) and ghauri (MIT) as separate processes, fetched by `bootstrap` and not redistributed here, each under its own license.
 
 </details>
