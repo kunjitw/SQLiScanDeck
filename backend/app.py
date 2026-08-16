@@ -410,7 +410,12 @@ async def _revalidate_static(request, call_next):
     resp = await call_next(request)
     path = request.url.path
     if path == "/" or path.endswith((".css", ".js", ".html")):
-        resp.headers["Cache-Control"] = "no-cache"
+        # no-store = never keep a copy at all (stronger than no-cache, which some browsers
+        # ignore for entries cached before the header existed). Combined with the ?v= hash
+        # on the includes, the frontend can never go stale.
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
     return resp
 
 
