@@ -4,22 +4,24 @@
 
 **貼上請求 → 選參數 → 一鍵背景併發 sqlmap / ghauri**
 可攜帶、全程入庫、歷史去重的 SQL Injection 測試駕駛艙。
+<sub>繁體中文 · English summary at the bottom ↓</sub>
 
-![SQLiScanDeck 主畫面 — 掃描佇列 + 路徑階層測試紀錄樹](docs/demo.png)
+![SQLiScanDeck 主畫面 — 左側掃描佇列(色燈狀態)+ 中間請求編排 + 右側路徑階層測試紀錄樹](docs/demo.png)
 
 </div>
 
 ## ⚡ 30 秒看懂
 
-- **這是什麼**:**sqlmap + ghauri** 的圖形操作台。貼一個 Burp 請求或 URL,它幫你**抽參數、濾雜訊、背景併發掃描、記錄歷史**。
-- **開始三步**:① 雙擊 **`bootstrap.bat`**(首次下載)→ ② 雙擊 **`start.bat`**(啟動、自動開瀏覽器 `http://127.0.0.1:8776`)→ ③ **貼請求 → 選工具 → 開始掃描**。
-- **本機自用**:不碰系統 Python、預設只綁 `127.0.0.1`、**無內建認證**。
+- **這是什麼**:**sqlmap + ghauri** 的圖形操作台。貼一段**原始 HTTP 請求**(例如 Burp 攔到的)或一個 URL,它幫你**抽參數、濾雜訊、背景併發掃描、記錄歷史**。
+- **為什麼不直接用 CLI**:一次背景**併發**跑多筆、**全程入庫**(指令 / log / 結果)、**歷史去重**、不用手打一堆 `--level/--risk/--technique` 旗標。
+- **開始三步**:① 雙擊 **`bootstrap.bat`**(首次下載)→ ② 雙擊 **`start.bat`**(自動開瀏覽器 `http://127.0.0.1:8776`)→ ③ **貼請求 → 選工具 → 開始掃描**。想零風險先試 → **[試玩內建靶機](#-試玩看看)**。
+- **需求 · 本機自用**:Windows 10/11、首次 `bootstrap` 需連網下載;不碰系統 Python、預設只綁 `127.0.0.1`、**無內建認證**。
 
 > ⚠️ **只對你有書面授權的目標使用。** 本機工具;**別把 `data/` 上傳**(含真實請求 / cookie / session)。
 
 ## 🧭 跳到你要的
 
-**[安裝啟動](#-安裝與啟動)** · **[試玩看看](#-試玩看看)** · **[五步教學](#-五步教學)** · **[主要功能](#-主要功能)** · **[安全授權](#-安全授權)** · 進階設定 / 架構 / FAQ 在最下方摺疊區
+**[安裝與啟動](#-安裝與啟動)** · **[試玩看看](#-試玩看看)** · **[五步教學](#-五步教學)** · **[主要功能](#-主要功能)** · **[安全與授權](#-安全與授權)** · 📸 畫面預覽 / ⚙️ 設定 / 🏗️ 架構 / ❓ FAQ 都在最下方摺疊區
 
 ## 🛠️ 安裝與啟動
 
@@ -30,6 +32,7 @@
 2. **之後每次**:**雙擊 `start.bat`**
    → 啟動並自動開瀏覽器到 **`http://127.0.0.1:8776`**。
 
+> 🆘 **卡住了 / 引擎燈是紅的?** → 看最下方 **❓ 常見問題**(多半是 `bootstrap` 沒跑完,重跑一次即可)。
 > 📦 **可攜帶**:複製整包到別台**已 bootstrap 過**的機器,直接 `start.bat` 就能用(免再下載)。
 > 🔌 內網 / 離線無法下載:把同事已 bootstrap 好的整包複製過來即可;完全手動安裝見下方〈手動安裝〉。
 
@@ -39,14 +42,14 @@
 
 1. **開靶機** — 另開一個終端機跑 `python testlab\vuln_server.py`(**故意有漏洞**、只綁 `127.0.0.1:5000`)。
 2. **掃它** — 在 SQLiScanDeck 貼 **`http://127.0.0.1:5000/product?id=1`**(或 `/user?id=1`、`/search?q=phone`…)→ 選工具 → **`開始掃描`**。
-3. **看結果** — 幾秒後亮**有漏洞**紅燈;點進去看**即時 log、判定、payload**,右側「測試紀錄樹」也會長出端點。
+3. **看結果** — 幾秒後亮**有漏洞**紅燈;點進去看**即時 log、判定、payload**(長相見下方 📸 畫面預覽),右側「測試紀錄樹」也會長出端點。
 
 > ⚠️ `testlab/vuln_server.py` **故意可被注入**,只能綁 `127.0.0.1`、**絕不可對外**。
 
 ## 🚀 五步教學
 
-1. **貼上請求** — 貼 Burp 原文或 URL(或按 **`📋 貼上剪貼簿`**),按 **`解析請求`**。參數分三區:**主參數**(預設勾)、Header、已自動略過(後兩區收合)。
-2. **選工具** — **sqlmap** 或 **ghauri**(同一款分段按鈕)。
+1. **貼上請求** — 貼原始請求或 URL(或按 **`📋 貼上剪貼簿`**),按 **`解析請求`**。參數分三區:**主參數**(預設勾)、Header、已自動略過(後兩區收合)。
+2. **選工具** — **sqlmap**(功能最全)或 **ghauri**(較快、對某些 WAF 較好)。
 3. **選模式** — **基本掃描**(無腦套用範本、唯讀看它動了哪些設定)或 **進階掃描**(自由調整所有選項)。
 4. **挑範本 / 調選項** — 選一個**範本**(或「不使用範本」);下方**掃描選項**依範本動態顯示,底部 **`將執行`** 即時顯示**實際會跑的指令**。
 5. **開始掃描** — 按 **`開始掃描`**、二次確認後背景執行。左側佇列看狀態色、點一筆看即時 log;右側紀錄樹累積歷史。
@@ -55,7 +58,7 @@
 
 ## ✨ 主要功能
 
-- **貼上就解析**:Burp 原文或 URL → 自動抽 GET / POST / JSON / Cookie / Header 參數。
+- **貼上就解析**:原始請求或 URL → 自動抽 GET / POST / JSON / Cookie / Header 參數。
 - **雜訊自動略過**:內建 **50 條過濾規則**(GA、FB pixel、CSRF、ViewState…),命中的預設不勾。
 - **基本 / 進階雙模式**:基本=只挑範本、唯讀顯示;進階=全手動。兩者**送出的指令完全一致**(同一份選項元件,不會漂移)。
 - **指令單一真相來源**:底部預覽由後端用**和實際執行相同的邏輯**(`build_args`)產生 → **看到的就是會跑的**。
@@ -66,21 +69,38 @@
 - **範本**:sqlmap / ghauri 各自分頁、各自預設、可拖曳排序,一鍵套用。
 - **深/淺色 + 方正俐落 UI**,支援 `prefers-reduced-motion`。
 
-## 🧠 三個要知道的觀念
-
-- **簽名去重只影響「顯示」**:路徑 id 正規化成 `{id}` 只是用來分組歷史 / 畫樹;**實際送測的是你貼的原文,路徑原封不動。**
-- **過濾規則只是取消勾選**:隨時可手動勾回。灰色地帶(session id、Authorization、第一方 cookie)**預設停用**,亂測可能弄壞你的 session。
-- **範本 = 一組掃描選項**,依工具分開,設為預設後每次自動帶入。
-
-## 🔒 安全・授權
+## 🔒 安全與授權
 
 - **僅供授權範圍內**的測試;只對有明確書面授權的目標使用。
+- **未授權掃描可能違法** —— 依當地法律,未經授權對他人系統測試可能觸法,後果自負。
 - **無內建認證**:若改綁 `0.0.0.0` 對外,請自行加存取控制。
 - **`data/` 不要上傳**(含真實請求 / cookie / log);`.gitignore` 已排除 `data/`、`python/`、`tools/`。
 - **`testlab/` 只能本機**:靶機故意有洞,**絕不可對外曝露**。
 - wrapper 程式碼採 **MIT**([`LICENSE`](LICENSE));編排 [sqlmap](https://github.com/sqlmapproject/sqlmap)(GPLv2)與 [ghauri](https://github.com/r0oth3x49/ghauri),以獨立子程序執行、由 `bootstrap` 從官方取得。
 
 ---
+
+<details>
+<summary>📸 <b>畫面預覽</b></summary>
+
+**請求編排 —— 選工具 / 模式 / 範本 / 選項 + 底部即時指令預覽:**
+
+![編排畫面 — 選工具、基本/進階模式、選範本、掃描選項,底部顯示實際會執行的 sqlmap 指令](docs/compose.png)
+
+**掃描詳情 —— 判定、每參數結果與證據、原始請求、即時 log:**
+
+![掃描詳情 — WAF 判定、每參數有漏洞/無洞與命中關鍵字、請求摘要、DBMS、即時 log](docs/detail.png)
+
+</details>
+
+<details>
+<summary>🧠 <b>三個要知道的觀念</b></summary>
+
+- **簽名去重只影響「顯示」**:路徑 id 正規化成 `{id}` 只是用來分組歷史 / 畫樹;**實際送測的是你貼的原文,路徑原封不動。**
+- **過濾規則只是取消勾選**:隨時可手動勾回。灰色地帶(session id、Authorization、第一方 cookie)**預設停用**,亂測可能弄壞你的 session。
+- **範本 = 一組掃描選項**,依工具分開,設為預設後每次自動帶入。
+
+</details>
 
 <details>
 <summary>⚙️ <b>設定</b></summary>
@@ -143,7 +163,9 @@ data/      執行時建立:DB、logs/、requests/、settings.json(.gitignore)
 <details>
 <summary>🌐 <b>English</b></summary>
 
-**SQLiScanDeck** is a graphical cockpit for **sqlmap** and **ghauri**. Paste a raw Burp request (or a URL); it extracts every testable parameter, auto-unchecks known noise (tracking cookies, CSRF, ViewState…), and runs concurrent background scans in one click. Every run is stored, and revisiting the same API shows *"tested N times / was vulnerable"*.
+**SQLiScanDeck** is a graphical cockpit for **sqlmap** and **ghauri**. Paste a raw HTTP request (e.g. from Burp) or a URL; it extracts every testable parameter, auto-unchecks known noise (tracking cookies, CSRF, ViewState…), and runs concurrent background scans in one click. Every run is stored, and revisiting the same API shows *"tested N times / was vulnerable"*.
+
+**Requirements** — Windows 10/11; first `bootstrap` needs internet. Local, single-user, no built-in auth.
 
 **Quick start** — ① run `bootstrap.bat` once, ② double-click `start.bat` (opens `http://127.0.0.1:8776`), ③ **paste → pick tool → Basic/Advanced → Start scan**.
 
@@ -151,6 +173,6 @@ data/      執行時建立:DB、logs/、requests/、settings.json(.gitignore)
 
 **Notable** — 50 built-in filter rules · Basic (template-only) vs Advanced mode with an *identical* launch payload · command preview built from the **same** code the launcher runs (no drift) · concurrent scans with a colour board + live log · **force-stop & delete** · dedup via endpoint signatures (*display only; the engine tests your original request*) · VSCode-style path tree with outcome filters · per-tool templates · dark/light theme.
 
-**Security** — authorized testing only; local tool with **no built-in auth** (add access control if you rebind to `0.0.0.0`); never publish `data/`; keep `testlab/` bound to loopback. Wrapper code is **MIT**; it orchestrates sqlmap (GPLv2) and ghauri as separate processes.
+**Security** — authorized testing only (unauthorized scanning may be illegal); local tool with **no built-in auth**; never publish `data/`; keep `testlab/` bound to loopback. Wrapper code is **MIT**; it orchestrates sqlmap (GPLv2) and ghauri as separate processes.
 
 </details>
