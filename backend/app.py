@@ -25,7 +25,8 @@ from scan_manager import manager  # noqa: E402
 from drivers import sqlmap_driver, ghauri_driver, base as drv_base  # noqa: E402
 
 from fastapi import FastAPI, Body, HTTPException  # noqa: E402
-from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse  # noqa: E402
+import hashlib  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 WEB_DIR = os.path.join(config.ROOT_DIR, "web")
@@ -413,9 +414,28 @@ async def _revalidate_static(request, call_next):
     return resp
 
 
+def _asset_ver(fn):
+    """8-char content hash used to cache-bust app.js/style.css."""
+    try:
+        with open(os.path.join(WEB_DIR, fn), "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()[:8]
+    except Exception:
+        return "0"
+
+
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(WEB_DIR, "index.html"))
+    # Append a content-hash ?v= to the JS/CSS includes so the browser is FORCED to fetch a
+    # fresh copy whenever either file changes -- kills the recurring stale-app.js confusion
+    # (a plain no-cache header doesn't help a browser that cached the file before it existed).
+    try:
+        with open(os.path.join(WEB_DIR, "index.html"), "r", encoding="utf-8") as f:
+            html = f.read()
+    except Exception:
+        return FileResponse(os.path.join(WEB_DIR, "index.html"))
+    html = html.replace('href="/style.css"', 'href="/style.css?v=%s"' % _asset_ver("style.css"))
+    html = html.replace('src="/app.js"', 'src="/app.js?v=%s"' % _asset_ver("app.js"))
+    return HTMLResponse(html)
 
 
 if os.path.isdir(WEB_DIR):
