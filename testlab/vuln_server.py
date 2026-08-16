@@ -193,11 +193,16 @@ class Handler(BaseHTTPRequestHandler):
         #      not appear to be injectable" -> status done, vulnerable false, param clean. ----
         if path == "/safe/product":
             raw = (params.get("id") or ["1"])[0]
-            if not raw.isdigit():
-                return self._send(self._page("safe", "<p>bad id — 只接受數字</p>"), 400)
+            # bound parameter -> NOT injectable. Coerce non-int input to 0 (never 400 / never
+            # error) so every injection payload gets a STABLE 200 -> the tools reach the
+            # positive "do not appear to be injectable" conclusion (done, clean).
+            try:
+                pid = int(raw)
+            except ValueError:
+                pid = 0
             with _lock:
                 cur = _conn.cursor()
-                cur.execute("SELECT * FROM products WHERE id = ?", (int(raw),))   # bound -> safe
+                cur.execute("SELECT * FROM products WHERE id = ?", (pid,))   # bound -> safe
                 rows = cur.fetchall()
             return self._send(self._page("安全端點 (parameterised, NOT injectable)",
                 "<p>query ok, %d row(s)</p><pre>%s</pre><p>此端點用 <b>bound parameter</b>,無法注入 —— "
