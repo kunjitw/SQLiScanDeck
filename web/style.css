@@ -348,12 +348,6 @@ input.mini { width: 100%; padding: 0.28rem 0.45rem; font-size: 0.78rem; }
 .seg-mini.active { background: var(--accent-soft); color: var(--accent); }
 .seg-mini:disabled { cursor: default; opacity: 0.6; }
 .basic-hint { font-size: 0.76rem; color: var(--fg-soft); margin: 0 0 0.6rem; padding: 0.4rem 0.55rem; border-left: 3px solid var(--accent); background: var(--accent-soft); }
-/* 全自訂 (fully custom) mode: free-flags textarea, no option controls */
-.custom-hint { font-size: 0.76rem; color: var(--fg-soft); margin: 0 0 0.6rem; line-height: 1.6; }
-.custom-hint code { font-family: var(--font-mono); font-size: 0.9em; background: var(--code-bg); padding: 0 3px; border-radius: 3px; }
-.custom-flags { width: 100%; box-sizing: border-box; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.5; padding: 0.6rem 0.7rem; background: var(--code-bg); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-sm); resize: vertical; min-height: 4rem; }
-.custom-flags:focus { outline: none; border-color: var(--accent); }
-.compose-footer.custom-mode #commonPins { display: none !important; }   /* the pinned strip is an option control -> hide it in 全自訂 */
 /* Sticky command + note + launch footer -- must read as fixed viewport CHROME, not "the last
    card that sticks". Root fix: it used to share the cards' --bg-elev surface (identical colour =
    mushy). Now: distinct --elevated ("floating" rung, cards read as behind it), full-bleed to the
@@ -682,6 +676,12 @@ table tr:last-child td { border-bottom: none; }
 .check.inline { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }
 /* ghauri scheme note under the command (http/https is applied via request rewrite, not a flag) */
 .cmd-scheme-note { font-size: 0.68rem; color: var(--fg-dim); padding: 0.1rem 0.2rem 0; line-height: 1.4; }
+/* ✏ 編輯指令: an editable command box that replaces the read-only preview while editing */
+.cmd-edit { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.5; padding: 0.4rem 0.55rem; background: var(--code-bg); color: var(--fg); border: 0; border-left: 2px solid var(--accent); border-radius: 0; resize: vertical; min-height: 3.2rem; box-shadow: inset 0 1px 2px rgba(0,0,0,0.55); }
+.cmd-edit:focus { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
+.cmd-edit-btns { display: flex; align-items: flex-start; gap: 0.3rem; flex-shrink: 0; }
+/* options are frozen while the command is being hand-edited (text is the source of truth) */
+.opts-locked { opacity: 0.5; pointer-events: none; filter: grayscale(0.35); transition: opacity var(--dur-fast); }
 /* 匯出輸出圖片 modal */
 .shot-modal { max-width: min(920px, 94vw); }
 .shot-toolbar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.55rem; }

@@ -45,7 +45,6 @@ function snapshotComposeTab() {
   const tool = selectedTool();
   t.tool = tool || null;
   t.options = tool ? gatherOptions("#optGrid", "#optToggles") : null;
-  t.customFlags = ($("#customFlags") && $("#customFlags").value) || "";   // 全自訂 typed flags
   t.scanMode = state.scanMode;
   t.note = ($("#scanNote") && $("#scanNote").value) || "";
   t.title = t.parsed ? (t.parsed.endpoint || (t.parsed.parsed && t.parsed.parsed.url) || "新分頁")
@@ -94,13 +93,11 @@ function applyTab(t) {
     $("#modeCard").classList.add("hidden");
     $("#templateCard").classList.add("hidden");
     $("#optionsCard").classList.add("hidden");
-    $("#customCard").classList.add("hidden");
     $("#composeFooter").classList.add("hidden");
   }
   if (t.tool) {
     selectTool(t.tool);                                   // renders options + shows mode/options/footer
     applyOptions(t.options || {}, "#optGrid", "#optToggles");
-    if ($("#customFlags")) $("#customFlags").value = t.customFlags || "";   // restore 全自訂 flags
     setScanMode(t.scanMode);                              // per-tab mode (defaults to advanced)
   } else {
     $$('input[name="tool"]').forEach(r => r.checked = false);
@@ -108,7 +105,6 @@ function applyTab(t) {
     $("#modeCard").classList.add("hidden");
     $("#templateCard").classList.add("hidden");
     $("#optionsCard").classList.add("hidden");
-    $("#customCard").classList.add("hidden");
     $("#composeFooter").classList.add("hidden");
   }
   if ($("#scanNote")) $("#scanNote").value = t.note || "";
@@ -1299,7 +1295,7 @@ function selectedTool() { const el = $('input[name="tool"]:checked'); return el 
 function _applyComposeDefaults() {
   const s = state.settings || {};
   let tool = s.default_tool; if (!SCHEMAS[tool]) tool = "sqlmap";
-  state.scanMode = ["basic", "custom"].includes(s.default_scan_mode) ? s.default_scan_mode : "advanced";
+  state.scanMode = (s.default_scan_mode === "basic") ? "basic" : "advanced";
   selectTool(tool, { autoDefault: true });   // selects tool + applies is_default template + setScanMode
 }
 function selectTool(tool, opts) {
@@ -1327,20 +1323,12 @@ function selectTool(tool, opts) {
 // filtered to just that template's settings and shown READ-ONLY. gatherOptions still
 // reads the DOM either way, so the launch payload is identical -- one component, no drift.
 function setScanMode(mode) {
-  state.scanMode = (mode === "basic") ? "basic" : (mode === "custom") ? "custom" : "advanced";
+  state.scanMode = (mode === "basic") ? "basic" : "advanced";
   $$("#modeCard .seg-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === state.scanMode));
-  const basic = state.scanMode === "basic", custom = state.scanMode === "custom";
-  // 全自訂:no option controls -> hide template + options + the pinned 常用設置 strip and show the
-  // free-flags card. _composeOpts() then sends ONLY the typed flags, bypassing the grid entirely.
-  const shown = !!state.parsed && !!selectedTool();
-  $("#customCard").classList.toggle("hidden", !(shown && custom));
-  $("#templateCard").classList.toggle("hidden", !(shown && !custom));
-  $("#optionsCard").classList.toggle("hidden", !(shown && !custom));
-  $("#composeFooter").classList.toggle("custom-mode", custom);   // CSS hides the 常用設置 strip
+  const basic = state.scanMode === "basic";
   const oc = $("#optionsCard"); if (oc) oc.classList.toggle("mode-basic", basic);
   const bh = $("#basicHint"); if (bh) bh.classList.toggle("hidden", !basic);
-  const mh = $("#modeHint"); if (mh) mh.textContent = custom ? "自由輸入指令,不需選項按鈕"
-    : basic ? "無腦套用範本" : "自由調整所有掃描選項";
+  const mh = $("#modeHint"); if (mh) mh.textContent = basic ? "無腦套用範本" : "自由調整所有掃描選項";
   // 「不使用範本」is an advanced-only escape hatch: basic mode always needs a template
   const noneBtn = $("#templateChips .tpl-none");
   if (noneBtn) noneBtn.classList.toggle("hidden", basic);
@@ -1349,19 +1337,11 @@ function setScanMode(mode) {
     const def = list.find(t => t.is_default) || list[0];
     if (def) applyTemplateById(def.id, true);   // auto-pick so basic never shows an empty grid
   }
-  if (!custom) _applyModeToGrid();
+  _applyModeToGrid();
   updateCmdPreview();
 }
-// effective options for preview/launch: 全自訂 bypasses the grid and sends only the user's typed
-// flags (as extra_flags); basic/advanced read the option controls as usual.
+// effective options for preview/launch (single source: the option controls)
 function _composeOpts() {
-  if (state.scanMode === "custom") {
-    // free flags, BUT carry the scheme (force_ssl) forward: the HTTPS/HTTP segbool is only
-    // hidden (still in the DOM), so gatherOptions still reads it. Otherwise ghauri https
-    // targets would silently downgrade to http in custom mode with no way to set it.
-    const carried = gatherOptions("#optGrid", "#optToggles");
-    return { extra_flags: (($("#customFlags") && $("#customFlags").value) || "").trim(), force_ssl: !!carried.force_ssl };
-  }
   return gatherOptions("#optGrid", "#optToggles");
 }
 function _applyModeToGrid() {
@@ -1668,6 +1648,87 @@ function _clearHoverGhost() {
   else updateCmdPreview();
 }
 
+// ===== 編輯指令 (hand-edit the command, then reverse-parse it back into the options) =====
+// The safe two-way flow: entering edit LOCKS the options (text is the source of truth); on
+// 套用 we reverse-parse the text back into the controls (recognised flags flash, the rest go
+// to 額外參數), then re-generate the command from the options -> never "對不上".
+function _lockOptions(locked) {
+  ["#optionsCard", "#templateCard", "#modeCard", "#commonPins"].forEach(sel => {
+    const el = $(sel); if (el) el.classList.toggle("opts-locked", locked);
+  });
+  const lb = $("#launchBtn"); if (lb) lb.disabled = locked;   // no launching mid-edit
+}
+async function enterCmdEdit() {
+  const tool = selectedTool(); if (!tool || !state.parsed) return;
+  _clearHoverGhost();
+  const cmd = await _fetchPreviewCmd(tool, _composeOpts());   // seed with the exact current command
+  const ta = $("#cmdEdit"); if (!ta) return;
+  ta.value = (cmd && cmd[0] !== "(") ? cmd : "";
+  $("#cmdPreview").classList.add("hidden"); ta.classList.remove("hidden");
+  $("#cmdEditBtn").classList.add("hidden");
+  $("#cmdApplyBtn").classList.remove("hidden"); $("#cmdCancelBtn").classList.remove("hidden");
+  _lockOptions(true);
+  state.cmdEditing = true;
+  ta.focus();
+}
+function _exitCmdEdit() {
+  const ta = $("#cmdEdit"); if (ta) ta.classList.add("hidden");
+  $("#cmdPreview").classList.remove("hidden");
+  $("#cmdEditBtn").classList.remove("hidden");
+  $("#cmdApplyBtn").classList.add("hidden"); $("#cmdCancelBtn").classList.add("hidden");
+  _lockOptions(false);
+  state.cmdEditing = false;
+}
+function cancelCmdEdit() { _exitCmdEdit(); updateCmdPreview(); }
+function applyCmdEdit() {
+  const edited = (($("#cmdEdit") && $("#cmdEdit").value) || "").trim();
+  if (state.scanMode !== "advanced") setScanMode("advanced");   // reveal the reflected options to keep editing
+  const { opts, recognized, unknownCount } = _reverseParseCmd(edited);
+  applyOptions(opts, "#optGrid", "#optToggles");   // absent keys reset to default -> options MATCH the text
+  _exitCmdEdit();
+  _flashOptions(recognized);
+  updateCmdPreview();   // regenerate the command from the now-updated options -> in sync
+  toast(recognized.length + " 個選項已回填" + (unknownCount ? (",另 " + unknownCount + " 個未知旗標放進『額外參數』") : ""), "ok");
+}
+// tokenised command -> { opts, recognized[], unknownCount }. Managed core (-r/--batch/
+// --disable-coloring/--output-dir) is skipped; unknown or not-for-this-tool flags -> extra_flags.
+function _reverseParseCmd(cmd) {
+  const toks = _tokenizeCmd(cmd || "");
+  const opts = {}, recognized = [], extras = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (i === 0) continue;                                   // tool name
+    if (t === "-r") { i++; continue; }                       // managed: -r <request file>
+    if (t === "--batch" || t === "--disable-coloring") continue;
+    if (t.startsWith("--output-dir")) { if (!t.includes("=")) i++; continue; }
+    if (!t.startsWith("-")) { extras.push(t); continue; }
+    let flag = t, val = null;
+    const eq = t.indexOf("=");
+    if (eq >= 0) { flag = t.slice(0, eq); val = t.slice(eq + 1); }
+    const key = CMD_FLAG_KEY[flag];
+    const el = key && document.querySelector(`#optGrid [data-optkey="${key}"], #commonPins [data-optkey="${key}"]`);
+    if (!el) { extras.push(t); continue; }                    // unknown / not-for-this-tool -> keep raw
+    if (CMD_BARE.has(flag)) { opts[key] = true; recognized.push(key); continue; }
+    if (val === null) {                                       // value in the next token (space form)
+      if (i + 1 < toks.length && !toks[i + 1].startsWith("-")) { val = toks[i + 1]; i++; } else val = "";
+    }
+    opts[key] = val; recognized.push(key);
+  }
+  opts.force_ssl = toks.some(t => t === "--force-ssl");       // explicit scheme (present = HTTPS)
+  if (opts.force_ssl && recognized.indexOf("force_ssl") < 0) recognized.push("force_ssl");
+  if (extras.length) opts.extra_flags = extras.join(" ");
+  return { opts, recognized: [...new Set(recognized)], unknownCount: extras.filter(t => t.startsWith("-")).length };
+}
+function _flashOptions(keys) {
+  (keys || []).forEach(key => {
+    const el = $(`#optGrid [data-optkey="${key}"], #optToggles [data-optkey="${key}"], #commonPins [data-optkey="${key}"]`);
+    if (!el) return;
+    const row = el.closest(".opt-row") || el.closest(".check") || el;
+    row.classList.add("opt-flash");
+    clearTimeout(row._flashT); row._flashT = setTimeout(() => row.classList.remove("opt-flash"), 1600);
+  });
+}
+
 // ===== launch =============================================================
 // Assess how intrusive the CURRENT options are, so the launch confirm can warn.
 // "risk 之類的等級設太高" -> high; noisy/heavy settings -> elevated.
@@ -1703,7 +1764,7 @@ function assessRisk(tool, o) {
     msg += " — 務必確認在授權範圍內(取 shell / 改資料 / 讀寫檔案)";
     bump("danger", msg);
   }
-  // 全自訂 / 額外參數 are free text, so the structured DANGER map above can't see them --
+  // 額外參數 / edited commands are free text, so the structured DANGER map above can't see them --
   // scan the raw flag string for the same destructive/aggressive flags (otherwise typed
   // --dump-all/--os-cmd would launch as "safe"). Also covers advanced-mode 額外參數.
   const ef = String(o.extra_flags || "");
@@ -2689,7 +2750,7 @@ async function loadGeneralSettings() {
   $("#setIpRefresh").value = state.settings.ip_refresh_seconds;
   $("#setPublicIp").checked = !!state.settings.public_ip_lookup; $("#setAutoOpen").checked = !!state.settings.auto_open_browser;
   $("#setDefaultTool").value = state.settings.default_tool || "sqlmap";
-  $("#setDefaultMode").value = ["basic", "custom"].includes(state.settings.default_scan_mode) ? state.settings.default_scan_mode : "advanced";
+  $("#setDefaultMode").value = state.settings.default_scan_mode === "basic" ? "basic" : "advanced";
   $("#setDefaultLogView").value = state.settings.default_log_view === "original" ? "original" : "highlighted";
   renderPinChooser();
 }
@@ -3058,7 +3119,7 @@ async function loadTemplates(applyLast) {
     let pref = (state.settings && state.settings.default_tool) || "";
     if (!SCHEMAS[pref]) { try { pref = localStorage.getItem("lastTool") || ""; } catch (e) {} }
     if (!SCHEMAS[pref]) pref = "sqlmap";
-    state.scanMode = (state.settings && ["basic", "custom"].includes(state.settings.default_scan_mode)) ? state.settings.default_scan_mode : "advanced";
+    state.scanMode = (state.settings && state.settings.default_scan_mode === "basic") ? "basic" : "advanced";
     selectTool(pref, { autoDefault: true });
   }
 }
@@ -3086,10 +3147,12 @@ function init() {
   $$("[data-sel]").forEach(b => b.onclick = () => selectParams(b.dataset.sel));
   $$('input[name="tool"]').forEach(r => r.onchange = () => selectTool(r.value, { autoDefault: true }));
   $$("#modeCard .seg-btn").forEach(b => b.onclick = () => setScanMode(b.dataset.mode));
+  $("#cmdEditBtn").onclick = enterCmdEdit;      // ✏ 編輯指令 -> reverse-parse-on-套用 flow
+  $("#cmdApplyBtn").onclick = applyCmdEdit;
+  $("#cmdCancelBtn").onclick = cancelCmdEdit;
   // an option change drops any hover ghost first, so clicking the toggle you're previewing
   // repaints the REAL command immediately (updateCmdPreview otherwise bails while a ghost shows).
   const _onOptChange = () => { _hoverGhostKey = null; updateCmdPreview(); };
-  if ($("#customFlags")) $("#customFlags").addEventListener("input", updateCmdPreview);   // 全自訂 -> live command
   $("#optGrid").addEventListener("input", _onOptChange);      // live command preview
   $("#optGrid").addEventListener("change", _onOptChange);     // selects / checkbox groups
   $("#optToggles").addEventListener("change", _onOptChange);

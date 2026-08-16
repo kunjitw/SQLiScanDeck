@@ -103,7 +103,6 @@
         <div class="seg-group mode-seg">
           <button type="button" class="seg-btn" data-mode="basic" id="modeBasicBtn">基本掃描</button>
           <button type="button" class="seg-btn" data-mode="advanced" id="modeAdvBtn">進階掃描</button>
-          <button type="button" class="seg-btn" data-mode="custom" id="modeCustomBtn">全自訂</button>
         </div>
         <span class="mode-hint" id="modeHint"></span>
       </div>
@@ -129,19 +128,22 @@
       </div>
     </section>
 
-    <!-- 6 · 全自訂:no option controls -- the user types the flags themselves -->
-    <section class="panel hidden" id="customCard">
-      <div class="section-head"><span class="bar"></span><span id="customTitle">6 · 自訂指令</span></div>
-      <p class="custom-hint">自己填要傳給工具的旗標,下方「將執行」即時顯示完整指令。核心 <code>-r 請求檔 --batch --output-dir</code> 由系統管理,不用填。<br>連線協定沿用你在<b>基本/進階</b>選的 HTTPS/HTTP(預設 HTTPS);要改就先切到進階調 <code>連線協定</code> 再回來。⚠ 互動式旗標(<code>--os-shell</code>/<code>--sql-shell</code> 等)會卡住(背景執行沒有 stdin),請勿使用。</p>
-      <textarea id="customFlags" class="custom-flags" rows="4" spellcheck="false" placeholder="例:--level 5 --risk 3 --technique BEUST --tamper space2comment --dbms MySQL --threads 8 --banner --dbs"></textarea>
-    </section>
 
     <!-- sticky bottom bar: command preview + note + launch (always visible while configuring) -->
     <div class="compose-footer hidden" id="composeFooter">
       <!-- pinned 常用設置: the settings people touch most, always one glance above 將執行 -->
       <div class="common-pins hidden" id="commonPins"></div>
       <div class="risk-line hidden" id="riskIndicator"></div>
-      <div class="cf-cmd"><span class="cf-lbl">將執行</span><code class="cmd-preview" id="cmdPreview">選擇工具後,這裡會顯示實際會跑的指令。</code></div>
+      <div class="cf-cmd">
+        <span class="cf-lbl">將執行</span>
+        <code class="cmd-preview" id="cmdPreview">選擇工具後,這裡會顯示實際會跑的指令。</code>
+        <textarea class="cmd-edit hidden" id="cmdEdit" spellcheck="false" rows="3"></textarea>
+        <div class="cmd-edit-btns">
+          <button type="button" class="btn ghost sm" id="cmdEditBtn" title="手動編輯指令;套用後會反解析回上面的選項">✏ 編輯</button>
+          <button type="button" class="btn primary sm hidden" id="cmdApplyBtn" title="套用:反解析指令 → 回填選項(認得的亮藍、其餘進『額外參數』)">✓ 套用</button>
+          <button type="button" class="btn ghost sm hidden" id="cmdCancelBtn">✗ 取消</button>
+        </div>
+      </div>
       <div class="cmd-scheme-note hidden" id="cmdSchemeNote"></div>
       <div class="cf-row">
         <label class="cf-note"><span class="cf-lbl">備註</span><input id="scanNote" class="note-input" spellcheck="false" placeholder="選填,只記錄不影響掃描"></label>
@@ -218,7 +220,7 @@
       <div class="section-head"><span class="bar"></span>一般設定</div>
       <div class="settings-col">
         <label class="field"><span>預設掃描工具(每次自動選)</span><select id="setDefaultTool"><option value="sqlmap">sqlmap</option><option value="ghauri">ghauri</option></select></label>
-        <label class="field"><span>預設掃描模式(每次自動套用)</span><select id="setDefaultMode"><option value="advanced">進階掃描</option><option value="basic">基本掃描</option><option value="custom">全自訂</option></select></label>
+        <label class="field"><span>預設掃描模式(每次自動套用)</span><select id="setDefaultMode"><option value="advanced">進階掃描</option><option value="basic">基本掃描</option></select></label>
         <label class="field"><span>掃描結果預設檢視</span><select id="setDefaultLogView"><option value="highlighted">我們的高亮</option><option value="original">原始(終端配色)</option></select></label>
         <label class="field"><span>同時併發掃描數(改後需重啟)</span><input id="setMax" type="number" min="1" max="32"></label>
       </div>
