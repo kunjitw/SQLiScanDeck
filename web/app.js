@@ -94,6 +94,7 @@ function applyTab(t) {
     $("#modeCard").classList.add("hidden");
     $("#templateCard").classList.add("hidden");
     $("#optionsCard").classList.add("hidden");
+    $("#customCard").classList.add("hidden");
     $("#composeFooter").classList.add("hidden");
   }
   if (t.tool) {
@@ -107,6 +108,7 @@ function applyTab(t) {
     $("#modeCard").classList.add("hidden");
     $("#templateCard").classList.add("hidden");
     $("#optionsCard").classList.add("hidden");
+    $("#customCard").classList.add("hidden");
     $("#composeFooter").classList.add("hidden");
   }
   if ($("#scanNote")) $("#scanNote").value = t.note || "";
@@ -1354,7 +1356,11 @@ function setScanMode(mode) {
 // flags (as extra_flags); basic/advanced read the option controls as usual.
 function _composeOpts() {
   if (state.scanMode === "custom") {
-    return { extra_flags: (($("#customFlags") && $("#customFlags").value) || "").trim() };
+    // free flags, BUT carry the scheme (force_ssl) forward: the HTTPS/HTTP segbool is only
+    // hidden (still in the DOM), so gatherOptions still reads it. Otherwise ghauri https
+    // targets would silently downgrade to http in custom mode with no way to set it.
+    const carried = gatherOptions("#optGrid", "#optToggles");
+    return { extra_flags: (($("#customFlags") && $("#customFlags").value) || "").trim(), force_ssl: !!carried.force_ssl };
   }
   return gatherOptions("#optGrid", "#optToggles");
 }
@@ -1693,6 +1699,25 @@ function assessRisk(tool, o) {
     if (other.length) msg += (rce.length ? ";另含 " : "⚠⚠ 危險操作:") + other.map(k => DANGER[k]).join("、");
     msg += " — 務必確認在授權範圍內(取 shell / 改資料 / 讀寫檔案)";
     bump("danger", msg);
+  }
+  // 全自訂 / 額外參數 are free text, so the structured DANGER map above can't see them --
+  // scan the raw flag string for the same destructive/aggressive flags (otherwise typed
+  // --dump-all/--os-cmd would launch as "safe"). Also covers advanced-mode 額外參數.
+  const ef = String(o.extra_flags || "");
+  if (ef) {
+    const EF_DANGER = [
+      [/--os-(cmd|shell|pwn)\b/, "在 DB 主機執行系統命令/取 shell(--os-*)"],
+      [/--file-(write|dest)\b/, "寫檔到伺服器(--file-write/--file-dest)"],
+      [/--(sql-query|sql-shell)\b/, "在目標執行任意 SQL(--sql-query/--sql-shell)"],
+      [/--file-read\b/, "讀取伺服器檔案(--file-read)"],
+      [/--dump-all\b/, "匯出整個 DB(--dump-all)"],
+      [/--dump\b/, "匯出資料表(--dump)"],
+      [/--passwords\b/, "抓密碼雜湊(--passwords)"],
+    ];
+    const efHit = EF_DANGER.filter(([re]) => re.test(ef)).map(([, m]) => m);
+    if (efHit.length) bump("danger", "自訂/額外參數含高破壞性旗標:" + efHit.join("、") + " — 務必確認在授權範圍內");
+    if (/--risk[\s=]+3\b/.test(ef)) bump("high", "自訂 --risk 3:重量級 payload,注入點在 UPDATE/DELETE 可能改動多列");
+    if (/--(os-shell|sql-shell)\b/.test(ef)) bump("high", "互動式旗標(--os-shell/--sql-shell)在背景執行會卡住(沒有 stdin)");
   }
   return { level, reasons };
 }
@@ -2426,7 +2451,7 @@ const _OUR_TS_RE = /^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\]\s?/;
 function _filterPureRaw(text) {
   const out = [];
   for (const line of (text || "").split(/\r?\n/)) {
-    if (line.includes("【判定】")) break;         // our verdict block is appended last -> stop here
+    if (line.includes("【判定】自動判讀依據")) break;   // OUR verdict block header (specific, won't match tool output)
     if (_OUR_WRAP_RE.test(line)) continue;         // drop 開始/結束/目標/備忘/中止 wrapper lines
     out.push(line.replace(_OUR_TS_RE, ""));        // strip our timestamp; keep the tool line (incl 指令:)
   }
@@ -2435,6 +2460,9 @@ function _filterPureRaw(text) {
 }
 function _syncLogViewUI(mode) {
   $$("#logViewSeg .seg-mini").forEach(b => b.classList.toggle("active", b.dataset.logview === mode));
+  // original view paints hardcoded terminal hex -> force a dark ground so it's readable in
+  // light theme too (otherwise light-grey-on-light-grey is invisible).
+  const lv = $("#sdLog"); if (lv) lv.classList.toggle("log-terminal", mode === "original");
   const lbl = $("#logLabel"); if (lbl) lbl.textContent = mode === "original" ? "工具原始輸出(終端配色)" : "判定依據已高亮";
 }
 function _renderDetailLog() {
@@ -2526,8 +2554,11 @@ async function _shotToPng() {
     }
   } catch (e) { toast("圖片產生失敗:" + (e.message || e), "err"); return null; }
   const totalH = tiles.reduce((s, t) => s + t.h, 0) + pad * 2;
-  let scale = 2;
-  if (Math.max(width, totalH) * scale > 30000) scale = 1;   // keep under Chrome's canvas dimension cap
+  const CAP = 32767;   // per-side canvas dimension limit (Chrome/Firefox); toDataURL fails past it
+  if (totalH > CAP || width > CAP) {   // even at 1x it won't fit -> tell the user instead of a blank PNG
+    toast("選取內容太長,無法一次匯出;請取消一些行,或分兩次匯出", "err"); return null;
+  }
+  const scale = (width * 2 <= CAP && totalH * 2 <= CAP) ? 2 : 1;   // 2x for crispness only if it still fits
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(width * scale); canvas.height = Math.round(totalH * scale);
   const ctx = canvas.getContext("2d"); ctx.scale(scale, scale);
@@ -2535,6 +2566,26 @@ async function _shotToPng() {
   let y = pad;
   for (const t of tiles) { ctx.drawImage(t.img, pad, y, contentWidth, t.h); y += t.h; }
   try { return canvas.toDataURL("image/png"); } catch (e) { toast("圖片轉檔失敗:" + (e.message || e), "err"); return null; }
+}
+// after editing, contenteditable leaves bare text nodes / untagged <div>s -> re-wrap every
+// visual line back into a .shot-line (with a data-color) so colour + drag-exclude keep working.
+function _normalizeShotLines() {
+  const cap = $("#shotCapture"); if (!cap) return;
+  const mkLine = (text, color) => {
+    const d = document.createElement("div");
+    d.className = "shot-line"; d.dataset.color = color || "#d4d4d4"; d.style.color = color || "#d4d4d4";
+    if (text) d.textContent = text; else d.innerHTML = "&nbsp;";
+    return d;
+  };
+  const frag = document.createDocumentFragment();
+  [...cap.childNodes].forEach(n => {
+    if (n.nodeType === Node.TEXT_NODE) { if (n.textContent !== "") frag.appendChild(mkLine(n.textContent, "#d4d4d4")); }
+    else if (n.nodeType === Node.ELEMENT_NODE) {
+      if (n.classList && n.classList.contains("shot-line")) frag.appendChild(n);   // keep colour + excluded state
+      else frag.appendChild(mkLine(n.textContent, (n.dataset && n.dataset.color) || "#d4d4d4"));
+    }
+  });
+  cap.innerHTML = ""; cap.appendChild(frag);
 }
 async function stopScan(id) {
   try { await api(`/api/scans/${id}/stop`, "POST"); toast("已送出中止(實際殺掉程序後才會標記 killed)", "ok"); }
@@ -3032,13 +3083,16 @@ function init() {
   $$("[data-sel]").forEach(b => b.onclick = () => selectParams(b.dataset.sel));
   $$('input[name="tool"]').forEach(r => r.onchange = () => selectTool(r.value, { autoDefault: true }));
   $$("#modeCard .seg-btn").forEach(b => b.onclick = () => setScanMode(b.dataset.mode));
+  // an option change drops any hover ghost first, so clicking the toggle you're previewing
+  // repaints the REAL command immediately (updateCmdPreview otherwise bails while a ghost shows).
+  const _onOptChange = () => { _hoverGhostKey = null; updateCmdPreview(); };
   if ($("#customFlags")) $("#customFlags").addEventListener("input", updateCmdPreview);   // 全自訂 -> live command
-  $("#optGrid").addEventListener("input", updateCmdPreview);      // live command preview
-  $("#optGrid").addEventListener("change", updateCmdPreview);     // selects / checkbox groups
-  $("#optToggles").addEventListener("change", updateCmdPreview);
-  $("#optToggles").addEventListener("input", updateCmdPreview);   // danger-zone text fields live-update
-  $("#commonPins").addEventListener("input", updateCmdPreview);   // 常用設置 strip must ALSO update the command live
-  $("#commonPins").addEventListener("change", updateCmdPreview);  // (else a pinned toggle/select won't reflect until another event fires)
+  $("#optGrid").addEventListener("input", _onOptChange);      // live command preview
+  $("#optGrid").addEventListener("change", _onOptChange);     // selects / checkbox groups
+  $("#optToggles").addEventListener("change", _onOptChange);
+  $("#optToggles").addEventListener("input", _onOptChange);   // danger-zone text fields live-update
+  $("#commonPins").addEventListener("input", _onOptChange);   // 常用設置 strip must ALSO update the command live
+  $("#commonPins").addEventListener("change", _onOptChange);  // (else a pinned toggle/select won't reflect until another event fires)
   $("#editTplLink").onclick = () => showSettings("templates");
 
   $("#settingsBtn").onclick = () => showSettings("general");
@@ -3095,6 +3149,7 @@ function init() {
     $("#shotHint").textContent = on ? "編輯模式:直接改文字;改完可再關閉編輯去選行"
                                     : "拖曳可勾選/取消要放進圖片的行(灰掉的不會進圖片);右下角可拖曳調整寬度";
     if (on) cap.focus();
+    else _normalizeShotLines();   // re-tag edited/new content as .shot-line so it stays colourable + excludable
   };
   $("#shotDownload").onclick = async () => {
     const url = await _shotToPng(); if (!url) return;

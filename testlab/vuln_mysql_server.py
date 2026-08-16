@@ -47,6 +47,9 @@ DB_CFG = dict(
     user=os.environ.get("VULN_DB_USER", "vulnapp"),
     password=os.environ.get("VULN_DB_PASS", "vulnpass"),
     database=os.environ.get("VULN_DB_NAME", "shop"),   # -> DATABASE() = 'shop'
+    # cap a runaway time-based SLEEP() payload so it can't pin a backend connection forever
+    # (each request opens its own connection; a burst could otherwise exhaust max_connections)
+    read_timeout=30,
 )
 
 

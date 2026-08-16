@@ -20,6 +20,7 @@ Usage:
 Env overrides: LAB_DB_PORT (default 3307).
 ========================================================================
 """
+import hashlib
 import os
 import shutil
 import socket
@@ -37,6 +38,8 @@ BIN = os.path.join(BASEDIR, "bin")
 MARIADB_VER = "11.4.4"
 MARIADB_URL = ("https://archive.mariadb.org/mariadb-%s/winx64-packages/"
                "mariadb-%s-winx64.zip" % (MARIADB_VER, MARIADB_VER))
+# pinned so a compromised mirror / MITM can't get an arbitrary binary run on `up`
+MARIADB_SHA256 = "ee15985d5d0f604fce817986a2749bb972e79e6f8647ae0e09d821a2fdcd6373"
 DATADIR = os.path.join(HERE, "mysql-data")
 LOGFILE = os.path.join(HERE, "mysql-data", "mariadbd.log")
 HOST = "127.0.0.1"
@@ -93,6 +96,14 @@ def ensure_binaries():
     print("· MariaDB not found — downloading portable build (~90MB, one-time)…")
     tmpzip = os.path.join(HERE, "_mariadb.zip")
     urllib.request.urlretrieve(MARIADB_URL, tmpzip)
+    h = hashlib.sha256()
+    with open(tmpzip, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest().lower() != MARIADB_SHA256:
+        os.remove(tmpzip)
+        sys.exit("!! MariaDB zip checksum mismatch (got %s) — refusing to run an unverified "
+                 "binary. Delete testlab/mariadb and retry, or update MARIADB_SHA256." % h.hexdigest())
     print("· extracting…")
     exdir = os.path.join(HERE, "_mariadb_tmp")
     shutil.rmtree(exdir, ignore_errors=True)
@@ -172,6 +183,9 @@ INSERT INTO posts VALUES (1,'Welcome','Editor','hello'),(2,'Second','Guest','mor
 
 
 def _exec_script(cur, script):
+    # naive ';' split -> the fixed SCHEMA/BLOG_SCHEMA constants below must NOT contain a ';'
+    # inside any string literal (they don't). Keep seed data ';'-free, or switch to a
+    # CLIENT.MULTI_STATEMENTS connection, if that ever changes.
     for stmt in [s.strip() for s in script.split(";") if s.strip()]:
         cur.execute(stmt)
 
@@ -238,7 +252,12 @@ def destroy():
     stop_server()
     if os.path.isdir(DATADIR):
         shutil.rmtree(DATADIR, ignore_errors=True)
-        print("· deleted", DATADIR)
+        # don't claim success if files were still locked (Windows) -> a half-deleted datadir
+        # would make the next `up` skip init and fail; tell the user to retry after exit.
+        if os.path.isdir(DATADIR):
+            print("!! could not fully delete %s (files still locked) — retry after the server exits" % DATADIR)
+        else:
+            print("· deleted", DATADIR)
 
 
 def main():

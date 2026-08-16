@@ -132,7 +132,7 @@
     <!-- 6 · 全自訂:no option controls -- the user types the flags themselves -->
     <section class="panel hidden" id="customCard">
       <div class="section-head"><span class="bar"></span><span id="customTitle">6 · 自訂指令</span></div>
-      <p class="custom-hint">自己填要傳給工具的旗標,下方「將執行」即時顯示完整指令。核心 <code>-r 請求檔 --batch --output-dir</code> 由系統管理,不用填。<br>掃描協定預設 <b>http</b>;打 https 目標(sqlmap)請自行加 <code>--force-ssl</code>。⚠ 互動式旗標(<code>--os-shell</code>/<code>--sql-shell</code> 等)會卡住(背景執行沒有 stdin),請勿使用。</p>
+      <p class="custom-hint">自己填要傳給工具的旗標,下方「將執行」即時顯示完整指令。核心 <code>-r 請求檔 --batch --output-dir</code> 由系統管理,不用填。<br>連線協定沿用你在<b>基本/進階</b>選的 HTTPS/HTTP(預設 HTTPS);要改就先切到進階調 <code>連線協定</code> 再回來。⚠ 互動式旗標(<code>--os-shell</code>/<code>--sql-shell</code> 等)會卡住(背景執行沒有 stdin),請勿使用。</p>
       <textarea id="customFlags" class="custom-flags" rows="4" spellcheck="false" placeholder="例:--level 5 --risk 3 --technique BEUST --tamper space2comment --dbms MySQL --threads 8 --banner --dbs"></textarea>
     </section>
 

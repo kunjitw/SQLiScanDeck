@@ -400,7 +400,6 @@ input.mini { width: 100%; padding: 0.28rem 0.45rem; font-size: 0.78rem; }
 .cmd-tok:hover, .cmd-tok-hl { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); text-decoration: none; }
 /* grey GHOST: a pinned 常用設置 not yet in the command. Setting it -> the real blue token
    appears and this ghost drops out, so the pin visibly "lights up" the instant you set it. */
-.cmd-ghosts { opacity: 0.9; }
 .cmd-tok.cmd-ghost { color: var(--fg-dim); font-style: italic; text-decoration-style: dashed; }
 .cmd-tok.cmd-ghost:hover, .cmd-tok.cmd-ghost.cmd-tok-hl { background: var(--bg-soft); box-shadow: inset 0 0 0 1px var(--fg-dim); color: var(--fg-soft); }
 .opt-flash { background: var(--accent-soft) !important; box-shadow: inset 0 0 0 1px var(--accent); border-radius: var(--radius-xs); }
@@ -673,6 +672,7 @@ table tr:last-child td { border-bottom: none; }
 .log-verdict { color: var(--accent); font-weight: 600; }
 .log-hit { background: var(--warn-soft); color: var(--warn); border-radius: 0; padding: 0 2px; }
 .log-enum { background: var(--accent-soft); color: var(--accent); border-radius: 0; padding: 0 2px; }   /* parsed enumeration value (banner / user / db / ...) */
+.log-view.log-terminal { background: #1e1e1e; color: #d4d4d4; }   /* 原始 view: fixed terminal palette needs a dark ground (light-theme readability) */
 /* raw-output view toggle header (高亮 / 原始 + 只顯示原始 + 匯出圖片) */
 .log-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
 .log-head .log-view-seg { flex-shrink: 0; }
