@@ -123,7 +123,9 @@ def parse_request(raw, force_ssl=False):
         # --- resolve absolute vs origin form target ---
         if re.match(r"^https?://", target, re.I):
             parts = urlsplit(target)
-            result["scheme"] = parts.scheme.lower()
+            # take host/path/query from the absolute URL, but let the caller's force_ssl
+            # (the HTTPS/HTTP selector) decide the SCHEME -- otherwise a pasted https:// line
+            # would pin the scheme and make the selector silently do nothing.
             result["host"] = parts.netloc or host_hdr
             path = parts.path or "/"
             query = parts.query

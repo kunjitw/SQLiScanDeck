@@ -1610,15 +1610,18 @@ function updateCmdPreview() {
       }
     }
   }
-  // ghauri applies http/https by REWRITING the request (Referer), not a CLI flag, so its
-  // command doesn't visibly change when you flip HTTPS/HTTP -- spell that out so it's not
-  // mistaken for "the toggle does nothing". sqlmap shows --force-ssl itself, so no note.
+  // Always show which scheme WILL be used, so flipping HTTPS/HTTP has a guaranteed visible
+  // effect for BOTH tools -- sqlmap also toggles --force-ssl in the command, but ghauri
+  // applies the scheme by rewriting the request (Referer), so its command can't change.
   const note = $("#cmdSchemeNote");
   if (note) {
-    if (tool === "ghauri" && state.parsed) {
-      note.textContent = opts.force_ssl
-        ? "ghauri:以 HTTPS 送出(預設,指令不需旗標)"
-        : "ghauri:以 HTTP 送出 — 會在請求注入 Referer: http://…(ghauri 無 --force-ssl 旗標,靠此降級)";
+    if (tool && state.parsed) {
+      const https = !!opts.force_ssl;
+      note.textContent = https
+        ? (tool === "ghauri" ? "🔒 連線協定:HTTPS(ghauri 預設 https,指令不需旗標)"
+                             : "🔒 連線協定:HTTPS(指令含 --force-ssl)")
+        : (tool === "ghauri" ? "🌐 連線協定:HTTP — ghauri 會在請求注入 Referer: http://…(它沒有 --force-ssl 旗標,靠此降級)"
+                             : "🌐 連線協定:HTTP(指令不含 --force-ssl)");
       note.classList.remove("hidden");
     } else { note.classList.add("hidden"); }
   }
