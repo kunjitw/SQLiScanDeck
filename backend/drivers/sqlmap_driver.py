@@ -207,7 +207,12 @@ def run(ctx):
         # the vulnerable flag regardless.
         fail_marker, fail_line = base.fail_evidence(log_text)
         clean_hit = base.looks_clean(log_text)
-        failed = (rc != 0) or (fail_marker is not None and not vulnerable and not clean_hit)
+        # A non-vuln result is trustworthy ONLY if the tool POSITIVELY reported
+        # "tested everything, nothing injectable" (clean_hit). rc!=0, OR (no vuln AND
+        # no clean signal) => the target was never really tested (dead / blocked /
+        # SSL / connection error -- listed in _FAILURE_MARKERS or not) => error, so we
+        # NEVER record a groundless "no vuln". fail_marker is now only for NAMING why.
+        failed = (rc != 0) or (not vulnerable and not clean_hit)
         status = "error" if failed else "done"
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
         base.append_verdict(ctx, tool="sqlmap", vulnerable=vulnerable,

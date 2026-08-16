@@ -232,7 +232,10 @@ def run(ctx):
         # a found vuln is preserved via the vulnerable flag regardless.
         fail_marker, fail_line = base.fail_evidence(log_text)
         clean_hit = base.looks_clean(log_text)
-        failed = (rc != 0) or (fail_marker is not None and not vulnerable and not clean_hit)
+        # trustworthy "no vuln" REQUIRES the positive "tested, nothing injectable"
+        # signal; no vuln + no clean signal => never really tested => error (see the
+        # sqlmap driver for the full rationale). Never record a groundless "no vuln".
+        failed = (rc != 0) or (not vulnerable and not clean_hit)
         status = "error" if failed else "done"
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
         base.append_verdict(ctx, tool="ghauri", vulnerable=vulnerable,

@@ -58,6 +58,7 @@ _VULN_MARKERS = (
 # recorded as "tested, no vuln" and poison the "tested before?" dedup history.
 _FAILURE_MARKERS = (
     # -- sqlmap phrasings --
+    "can't establish ssl connection",               # TLS handshake failed (e.g. --force-ssl on an http/localhost target)
     "unable to connect to the target url",
     "connection timed out to the target url",
     "connection timed out while trying",
@@ -303,18 +304,22 @@ def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
         L("【判定】有漏洞:是 ← 命中關鍵字「{}」".format(vuln_marker))
         if vuln_line:
             L("【判定】  依據行:{}".format(vuln_line))
+    elif status == "error":
+        L("【判定】有漏洞:無法判定 ← 掃描未正常完成(見下方狀態),此結果不代表「無洞」")
     else:
-        L("【判定】有漏洞:否 ← 全文未出現漏洞關鍵字")
+        L("【判定】有漏洞:否 ← 已測完所有參數、命中「無可注入」完成訊號")
 
     # 2) status + the reason it was reached
     if returncode is None:
         L("【判定】狀態:{}(使用者中止,不記錄參數歷史)".format(status))
     elif status == "error" and returncode != 0:
         L("【判定】狀態:error ← returncode={}(非 0:程序異常/崩潰)".format(returncode))
-    elif status == "error":
+    elif status == "error" and fail_marker:
         L("【判定】狀態:error ← returncode=0,但命中「連線/存取失敗」關鍵字「{}」(目標未實際受測)".format(fail_marker))
         if fail_line:
             L("【判定】  依據行:{}".format(fail_line))
+    elif status == "error":
+        L("【判定】狀態:error ← returncode=0,但未出現「測試完成」訊號(疑似連線/SSL 失敗或掃描中斷)—— 目標未實際測完,不能當作「無洞」")
     elif clean_hit:
         L("【判定】狀態:done ← returncode={}、命中「已測完但無可注入參數」完成訊號".format(returncode))
     elif fail_marker:
