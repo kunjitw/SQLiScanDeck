@@ -471,15 +471,32 @@ def _param_outcomes(row):
     # renders as clean on multi-param scans.
     vuln = {str(p).split(" (")[0].strip() for p in (res.get("parameters") or [])}
     per = res.get("per_param") or {}
+    status = row.get("status")
+    scan_vuln = bool(row.get("vulnerable"))
     out = []
     for p in params:
         if not p.get("selected"):
             continue
         name = p.get("name")
-        out.append({"n": name, "v": bool(name in vuln or per.get(name) == "vulnerable")})
+        pv = per.get(name)
+        # EVIDENCE-BASED, never default-to-clean: 'clean' needs a positive signal (the tool
+        # said so for this param, OR the scan positively completed clean status==done). A
+        # selected param on an errored/killed/half-run scan is 'unknown' (未確認), NOT 無洞.
+        if name in vuln or pv == "vulnerable":
+            st = "vuln"
+        elif pv == "tentative":
+            st = "tentative"                       # unresolved tentative -> 疑似, never silently clean
+        elif pv == "clean":
+            st = "clean"                           # tool explicitly cleared THIS param
+        elif not scan_vuln and status == "done":
+            st = "clean"                           # scan positively completed clean, no per-param verdict
+        else:
+            st = "unknown"                         # selected but no evidence + not a clean completion
+        out.append({"n": name, "st": st, "v": st == "vuln"})
     # single-param inference: scan is vulnerable but the tool named no param (common with
     # ghauri) and exactly one param was tested -> that param is the injectable one.
-    if row.get("vulnerable") and len(out) == 1 and not out[0]["v"]:
+    if scan_vuln and len(out) == 1 and out[0]["st"] != "vuln":
+        out[0]["st"] = "vuln"
         out[0]["v"] = True
     return out
 

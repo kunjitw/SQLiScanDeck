@@ -1645,7 +1645,7 @@ function renderScanRow(s) {
   const canStop = s.status === "running" || s.status === "queued";
   const pouts = s.pouts || [];   // tested params (skipped omitted); v = has an injection point
   const pchips = pouts.length
-    ? `<div class="scan-row-params">${pouts.map(po => `<span class="pchip ${po.v ? "pv" : "pc"}" title="${esc(po.n)}${po.v ? " · 有注入點" : " · 無注入點"}">${esc(po.n)}</span>`).join("")}</div>`
+    ? `<div class="scan-row-params">${pouts.map(po => { const st = po.st || (po.v ? "vuln" : "clean"); const m = { vuln: ["pv", "有注入點"], clean: ["pc", "無注入點"], tentative: ["pt", "疑似(待確認)"], unknown: ["pu", "未確認(未測完)"] }[st] || ["pu", "未確認"]; return `<span class="pchip ${m[0]}" title="${esc(po.n)} · ${m[1]}">${esc(po.n)}</span>`; }).join("")}</div>`
     : "";
   return `<div class="scan-row st-${st} ${s.id === state.detailId ? "active" : ""}${s.id === state.flashScanId ? " flash-target" : ""}" data-id="${s.id}">
     ${stateChip(s)}
@@ -1936,8 +1936,16 @@ function findingsHtml(s) {
     else if (f.is_dba === false) kv("DBA 權限", "否");
     if (f.current_db) kv("目前資料庫", f.current_db);
     if (f.hostname) kv("主機名", f.hostname);
-    if (f.databases_count != null) kv("資料庫數", f.databases_count);
+    if (f.databases && f.databases.length) kv("資料庫", f.databases.join(" / "));
+    else if (f.databases_count != null) kv("資料庫數", f.databases_count);
+    if (f.tables_count != null) kv("資料表數", f.tables_count);
+    if (f.table_names && f.table_names.length) kv("資料表", f.table_names.join(" / "));
+    if (f.columns_count != null) kv("欄位數", f.columns_count);
+    if (f.entries_count != null) kv("匯出列數", f.entries_count);
+    if (f.db_users && f.db_users.length) kv("DB 使用者", f.db_users.join(" / "));
+    if (f.password_hashes && f.password_hashes.length) kv("密碼雜湊", f.password_hashes.length + " 筆");
     if (f.web_tech) kv("Web 技術", f.web_tech);
+    if (f.heuristic_sqli && f.heuristic_sqli.length) kv("heuristic 疑似可注入", f.heuristic_sqli.join(" / "));
     // bonus non-SQLi heuristic findings surfaced during the SQLi run
     if (f.heuristic_xss && f.heuristic_xss.length) kv("附帶・疑似 XSS", f.heuristic_xss.join(" / "));
     if (f.heuristic_fi && f.heuristic_fi.length) kv("附帶・疑似 FI", f.heuristic_fi.join(" / "));
@@ -1948,13 +1956,16 @@ function findingsHtml(s) {
 }
 // per-parameter outcome (mirrors the backend param-history logic) so the detail
 // view can show WHICH params were tested / skipped / vulnerable / clean.
-function _paramOutcome(p, f, scanVuln) {
+function _paramOutcome(p, f, scanVuln, scanDone) {
   if (!p.selected) return { label: "已略過", cls: "st-skip" };
   const pp = (f && f.per_param) || {};
   const vulnNames = (f && f.parameters) || [];
   if (vulnNames.indexOf(p.name) >= 0 || pp[p.name] === "vulnerable") return { label: "有漏洞", cls: "st-vuln" };
-  if (pp[p.name] === "clean" || !scanVuln) return { label: "無洞", cls: "st-clean" };
-  return { label: "已測", cls: "st-other" };   // vuln found elsewhere, this one inconclusive
+  if (pp[p.name] === "clean") return { label: "無洞", cls: "st-clean" };            // tool said clean for THIS param
+  if (pp[p.name] === "tentative") return { label: "疑似", cls: "st-tent" };          // tool's tentative, unconfirmed
+  if (!scanVuln && scanDone) return { label: "無洞", cls: "st-clean" };              // scan positively completed clean
+  if (!scanVuln && !scanDone) return { label: "未確認", cls: "st-other" };           // errored/killed/half-run -> NOT 無洞
+  return { label: "已測", cls: "st-other" };   // scan vulnerable elsewhere, this one inconclusive
 }
 function _reqSummaryHtml(s) {
   const { host, ep } = splitEndpoint(s);
@@ -1991,9 +2002,10 @@ function _paramsVerdictHtml(s) {
   if (!Array.isArray(params) || !params.length) return `<div class="sd-sec-title">判定 · 參數</div><div class="empty small">此請求沒有解析到參數。</div>`;
   let f = s.result; if (!f && s.result_json) { try { f = JSON.parse(s.result_json); } catch (e) {} }
   const scanVuln = !!s.vulnerable;
+  const scanDone = s.status === "done";
   const ev = _scanEvidence();
-  const order = { "st-vuln": 0, "st-clean": 1, "st-other": 2, "st-skip": 3 };
-  const rows = params.map(p => ({ p, oc: _paramOutcome(p, f, scanVuln) }));
+  const order = { "st-vuln": 0, "st-tent": 1, "st-clean": 2, "st-other": 3, "st-skip": 4 };
+  const rows = params.map(p => ({ p, oc: _paramOutcome(p, f, scanVuln, scanDone) }));
   // ghauri often reports an injection WITHOUT naming the parameter; if the scan is
   // vulnerable, nothing got attributed, and exactly one param was tested, that param
   // IS the one -> attribute it (safe single-param inference; multi-param stays as-is).
@@ -2004,7 +2016,9 @@ function _paramsVerdictHtml(s) {
     let evidence;
     if (oc.cls === "st-vuln") evidence = ev ? "命中 " + ev : "偵測到注入點";
     else if (oc.cls === "st-clean") evidence = "無注入點";
+    else if (oc.cls === "st-tent") evidence = "工具暫定疑似,尚未確認";
     else if (oc.cls === "st-skip") evidence = "未勾選,本次未測試";
+    else if (oc.label === "未確認") evidence = "掃描未完成,此參數未實際測完(非無洞)";
     else evidence = "已測,此參數無定論";
     return `<div class="pv-row ${oc.cls}"><span class="state-chip ${oc.cls}">${oc.label}</span>`
       + `<span class="pv-name">${esc(p.name)}</span><span class="loc-chip">${esc(p.location || "?")}</span>`

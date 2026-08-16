@@ -29,8 +29,13 @@ from urllib.parse import urlparse, parse_qs
 def _delay_from_payload(raw):
     """Simulated time-based backend: if the injected value carries a delay
     function, ACTUALLY sleep that many seconds (capped 15) so sqlmap/ghauri/gosqli
-    time-based payloads visibly delay the response. Covers MySQL SLEEP(),
-    PostgreSQL pg_sleep() and MSSQL WAITFOR DELAY."""
+    time-based payloads visibly delay the response. Covers sqlmap's SQLite heavy
+    query (RANDOMBLOB), MySQL SLEEP(), PostgreSQL pg_sleep() and MSSQL WAITFOR."""
+    # sqlmap's SQLite time payload is a heavy query, NOT sleep(): the leading digits of
+    # RANDOMBLOB(<SLEEPTIME>00000000/2) encode --time-sec. Match this FIRST.
+    m = re.search(r"randomblob\s*\(\s*(\d+?)0{6,}", raw, re.I)
+    if m:
+        return min(int(m.group(1)) or 5, 15)
     for pat in (r"sleep\s*\(\s*(\d+)", r"pg_sleep\s*\(\s*(\d+)",
                 r"waitfor\s+delay\s+'0*:0*:0*(\d+)"):
         m = re.search(pat, raw, re.I)
@@ -78,13 +83,21 @@ def _init_db():
 def _run_sql(sql):
     """Execute and return rows as text. Errors are RETURNED (error-based SQLi)."""
     with _lock:
+        # Neutralise sqlmap's SQLite time-based HEAVY query so it doesn't allocate ~750MB
+        # per probe (HEX(RANDOMBLOB(500000000/2))): honour the intended delay, then shrink
+        # the blob to 1 byte before executing.
+        d = _delay_from_payload(sql)
+        if d:
+            time.sleep(d)
+            sql = re.sub(r"RANDOMBLOB\s*\(\s*\d+[^)]*\)", "RANDOMBLOB(1)", sql, flags=re.I)
         try:
             cur = _conn.cursor()
             cur.execute(sql)
             rows = cur.fetchall()
             return True, rows
-        except Exception as e:                       # surfaces SQL errors on purpose
-            return False, str(e)
+        except Exception as e:                       # surfaces SQL errors on purpose;
+            # wrap with a token BOTH tools recognise as SQLite so DBMS fingerprint fires
+            return False, "System.Data.SQLite.SQLiteException: " + str(e)
 
 
 # path -> (sql_template, [param names], is_quoted_string_context)
@@ -175,6 +188,20 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 inner = "<h3>✗ 查無使用者</h3>"
             return self._send(self._page("布林盲注 (boolean-based blind)", inner))
+        # ---- SAFE reference endpoint: takes a param but is NOT injectable (bound
+        #      parameter + validation). Expected: BOTH tools -> "all tested parameters do
+        #      not appear to be injectable" -> status done, vulnerable false, param clean. ----
+        if path == "/safe/product":
+            raw = (params.get("id") or ["1"])[0]
+            if not raw.isdigit():
+                return self._send(self._page("safe", "<p>bad id — 只接受數字</p>"), 400)
+            with _lock:
+                cur = _conn.cursor()
+                cur.execute("SELECT * FROM products WHERE id = ?", (int(raw),))   # bound -> safe
+                rows = cur.fetchall()
+            return self._send(self._page("安全端點 (parameterised, NOT injectable)",
+                "<p>query ok, %d row(s)</p><pre>%s</pre><p>此端點用 <b>bound parameter</b>,無法注入 —— "
+                "掃描應判為<b>無洞</b>。</p>" % (len(rows), html.escape("\n".join(map(str, rows))))))
         if path in STATIC:
             rows = ""
             for p in sorted(ROUTES):

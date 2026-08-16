@@ -95,14 +95,18 @@ _WAF_MARKERS = (
     "protected by some kind of waf/ips",
     "is dropping 'suspicious' requests",
     "is resetting 'suspicious' requests",
+    "filtered out by some sort of waf/ids",   # ghauri's wording (note: IDS, not IPS)
 )
 
 _DBMS_RE = re.compile(r"back-end DBMS:\s*(.+)", re.I)
 _DBMS_IS_RE = re.compile(r"the back-end DBMS is\s+(?!not\b)(.+)", re.I)   # ghauri prints "...is not X" while eliminating candidates -> skip those, keep the confirmation
-_PARAM_RE = re.compile(r"^\s*Parameter:\s*(.+)$", re.I | re.M)
-_TYPE_RE = re.compile(r"^\s*Type:\s*(.+)$", re.I | re.M)
-_TITLE_RE = re.compile(r"^\s*Title:\s*(.+)$", re.I | re.M)
-_PAYLOAD_RE = re.compile(r"^\s*Payload:\s*(.+)$", re.I | re.M)
+# our append_log() prefixes every line with "[YYYY-MM-DD HH:MM:SS] ", which defeats a
+# plain ^-anchor -> line-anchored regexes MUST allow that optional prefix.
+_TS = r"(?:\[[^\]]*\]\s*)?"
+_PARAM_RE = re.compile(r"^" + _TS + r"Parameter:\s*(.+)$", re.I | re.M)
+_TYPE_RE = re.compile(r"^" + _TS + r"\s*Type:\s*(.+)$", re.I | re.M)
+_TITLE_RE = re.compile(r"^" + _TS + r"\s*Title:\s*(.+)$", re.I | re.M)
+_PAYLOAD_RE = re.compile(r"^" + _TS + r"\s*Payload:\s*(.+)$", re.I | re.M)
 # post-detection enumeration (sqlmap AND ghauri use the same 'label: value' wording)
 _BANNER_RE = re.compile(r"banner:\s*'([^']+)'", re.I)
 _CURUSER_RE = re.compile(r"current user:\s*'([^']+)'", re.I)
@@ -111,6 +115,18 @@ _HOSTNAME_RE = re.compile(r"hostname:\s*'([^']+)'", re.I)
 _ISDBA_RE = re.compile(r"current user is DBA:\s*(true|false)", re.I)
 _DBS_RE = re.compile(r"available databases \[(\d+)\]", re.I)
 _WEBTECH_RE = re.compile(r"web application technology:\s*(.+)", re.I)
+# --dbs / --users NAMES: a "header [N]:" line followed by one or more "[*] <name>" lines
+_DBS_NAMES_RE = re.compile(r"available databases \[\d+\][^\n]*\n((?:" + _TS + r"\[\*\][^\n]*\n?)+)", re.I)
+_USERS_NAMES_RE = re.compile(r"database management system users \[\d+\][^\n]*\n((?:" + _TS + r"\[\*\][^\n]*\n?)+)", re.I)
+_STAR_ITEM_RE = re.compile(r"\[\*\]\s*(.+)")
+# --tables / --columns / --dump: counts (un-anchored is safe) + the Database:/Table: labels
+_TABLES_CNT_RE = re.compile(r"\[(\d+)\s+tables?\]", re.I)
+_COLS_CNT_RE = re.compile(r"\[(\d+)\s+columns?\]", re.I)
+_ENTRIES_CNT_RE = re.compile(r"\[(\d+)\s+entr(?:y|ies)\]", re.I)
+_TABLE_LABEL_RE = re.compile(r"^" + _TS + r"\s*Table:\s*(.+)$", re.I | re.M)
+_PWHASH_RE = re.compile(r"password hash:\s*(.+)", re.I)
+# sqlmap's positive heuristic (tentative, informational only -- NOT a verdict input)
+_HEUR_SQLI_RE = re.compile(r"parameter '([^']+)' might be injectable", re.I)
 
 # explicit PER-PARAMETER verdict lines the tools print, e.g.
 #   "GET parameter 'id' is vulnerable"                    (sqlmap, confirmed)
@@ -217,10 +233,13 @@ def per_param_verdicts(log_text):
     false-positive retraction) overrides it; a CONFIRMED "is vulnerable/injectable" wins
     outright. This stops a tentative hit that the tool LATER rejects from being recorded
     as a confirmed injection (which used to poison the dedup history)."""
-    text = log_text or ""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", log_text or "")   # strip ANSI so colour-wrapped names match
     verdicts = {}
     for m in _PP_TENTATIVE_RE.finditer(text):
-        verdicts.setdefault(m.group(1), "vulnerable")   # provisional (weakest)
+        verdicts.setdefault(m.group(1), "tentative")    # provisional ONLY -- NOT counted as
+                                                        # vulnerable by merge_vuln, so an
+                                                        # interrupted scan can't record a false
+                                                        # confirmed injection off a tentative hit
     for m in _PP_CLEAN_RE.finditer(text):
         verdicts[m.group(1)] = "clean"                  # rejection overrides a tentative
     for rx in _PP_CONFIRMED_RES:
@@ -233,14 +252,16 @@ def extract_findings(log_text):
     """Best-effort structured findings scraped from the raw log text. Every field
     is informational (surfaced to the user); none of it changes the vulnerable
     verdict."""
-    text = log_text or ""
+    # strip ANSI colour codes first (ghauri 1.4.3 has no --disable-coloring, and can wrap
+    # a param name in colour escapes -> would corrupt every quoted-name match otherwise).
+    text = re.sub(r"\x1b\[[0-9;]*m", "", log_text or "")
     findings = {
         "dbms": None,
         "parameters": [],
         "types": [],
         "titles": [],
         "payloads": [],
-        # explicit per-parameter verdicts {name: 'vulnerable'|'clean'}
+        # explicit per-parameter verdicts {name: 'vulnerable'|'clean'|'tentative'}
         "per_param": {},
         # enumeration (present only when the user asked for --banner /
         # --current-user / --current-db / --hostname / --is-dba / --dbs AND the
@@ -251,8 +272,16 @@ def extract_findings(log_text):
         "hostname": None,
         "is_dba": None,
         "databases_count": None,
+        "databases": [],          # actual DB names from --dbs
+        "db_users": [],           # --users names (sqlmap only)
+        "password_hashes": [],    # --passwords hashes (sqlmap only)
+        "tables_count": None,     # --tables
+        "table_names": [],        # Table: <name> labels seen
+        "columns_count": None,    # --columns
+        "entries_count": None,    # --dump rows
         "web_tech": None,
         # bonus non-SQLi heuristic hits + reliability caveats (informational)
+        "heuristic_sqli": [],     # sqlmap "might be injectable" (tentative, informational)
         "heuristic_xss": [],
         "heuristic_fi": [],
         "caveats": [],
@@ -291,6 +320,31 @@ def extract_findings(log_text):
         except ValueError:
             findings["databases_count"] = None
     findings["web_tech"] = _one(_WEBTECH_RE)
+
+    # --dbs / --users NAMES (header "[N]:" then "[*] <name>" lines). Both tools reuse
+    # "[*]" for START/END banners, so drop "starting @ .."/"ending @ ..".
+    def _star_names(block_re):
+        blk = block_re.search(text)
+        if not blk:
+            return []
+        return [n.strip() for n in _STAR_ITEM_RE.findall(blk.group(1))
+                if not re.match(r"(?:starting|ending)\s+@", n.strip(), re.I)]
+    findings["databases"] = _star_names(_DBS_NAMES_RE)
+    findings["db_users"] = _star_names(_USERS_NAMES_RE)
+    findings["password_hashes"] = [m.group(1).strip() for m in _PWHASH_RE.finditer(text)]
+    findings["table_names"] = sorted({m.strip() for m in _TABLE_LABEL_RE.findall(text)})
+
+    def _cnt(rx):
+        mm = rx.search(text)
+        try:
+            return int(mm.group(1)) if mm else None
+        except ValueError:
+            return None
+    findings["tables_count"] = _cnt(_TABLES_CNT_RE)
+    findings["columns_count"] = _cnt(_COLS_CNT_RE)
+    findings["entries_count"] = _cnt(_ENTRIES_CNT_RE)
+    findings["heuristic_sqli"] = sorted({m.group(1) for m in _HEUR_SQLI_RE.finditer(text)})
+
     findings["per_param"] = per_param_verdicts(text)
     findings["heuristic_xss"] = sorted({m.group(1) for m in _XSS_RE.finditer(text)})
     findings["heuristic_fi"] = sorted({m.group(1) for m in _FI_RE.finditer(text)})
@@ -308,15 +362,17 @@ def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
     L = ctx.append_log
     L("──── 【判定】自動判讀依據 ────")
 
-    # 1) vulnerable?
+    # 1) vulnerable? A "否" (clean) verdict is only claimed on a POSITIVE completion
+    #    (status=='done' -> the driver required a clean_hit). error AND killed both fall
+    #    to "無法判定" -- never a clean conclusion drawn merely from status != error.
     if vulnerable:
         L("【判定】有漏洞:是 ← 命中關鍵字「{}」".format(vuln_marker))
         if vuln_line:
             L("【判定】  依據行:{}".format(vuln_line))
-    elif status == "error":
-        L("【判定】有漏洞:無法判定 ← 掃描未正常完成(見下方狀態),此結果不代表「無洞」")
-    else:
+    elif status == "done":
         L("【判定】有漏洞:否 ← 已測完所有參數、命中「無可注入」完成訊號")
+    else:
+        L("【判定】有漏洞:無法判定 ← 掃描未正常完成或未出現「無可注入」完成訊號(狀態:{}),此結果不代表「無洞」".format(status))
 
     # 2) status + the reason it was reached
     if returncode is None:
@@ -356,20 +412,39 @@ def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
         L("【判定】DBMS:{}".format(findings["dbms"]))
     if findings.get("parameters"):
         L("【判定】可注入參數:{}".format(" / ".join(findings["parameters"])))
+    if findings.get("types"):
+        L("【判定】注入技法:{}".format(" / ".join(dict.fromkeys(findings["types"]))))
     enum_fields = [
         ("banner", "banner"),
         ("current_user", "current user"),
         ("current_db", "current db"),
         ("hostname", "hostname"),
-        ("databases_count", "databases"),
         ("web_tech", "web tech"),
     ]
     enum = ["{}={}".format(label, findings[key]) for key, label in enum_fields
             if findings.get(key) is not None]
     if findings.get("is_dba") is not None:
         enum.append("is DBA={}".format(findings["is_dba"]))
+    if findings.get("databases"):
+        enum.append("databases[{}]={}".format(len(findings["databases"]), "、".join(findings["databases"])))
+    elif findings.get("databases_count") is not None:
+        enum.append("databases={}".format(findings["databases_count"]))
+    if findings.get("db_users"):
+        enum.append("db users={}".format("、".join(findings["db_users"])))
+    if findings.get("password_hashes"):
+        enum.append("password hashes={}".format(len(findings["password_hashes"])))
+    if findings.get("tables_count") is not None:
+        enum.append("tables={}".format(findings["tables_count"]))
+    if findings.get("columns_count") is not None:
+        enum.append("columns={}".format(findings["columns_count"]))
+    if findings.get("entries_count") is not None:
+        enum.append("dump entries={}".format(findings["entries_count"]))
     if enum:
         L("【判定】列舉:{}".format("、".join(enum)))
+    if findings.get("table_names"):
+        L("【判定】資料表:{}".format(" / ".join(findings["table_names"])))
+    if findings.get("heuristic_sqli"):
+        L("【判定】附帶提示・heuristic 疑似可注入:參數 {}(暫定,非確認)".format("、".join(findings["heuristic_sqli"])))
     if findings.get("is_dba") is True:
         L("【判定】權限:目前資料庫帳號具 DBA 權限(影響程度高)")
 
