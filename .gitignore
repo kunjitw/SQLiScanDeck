@@ -29,6 +29,9 @@ venv/
 *.tar.gz
 *.tgz
 
+# ── vendored/downloaded skill package (installed to ~/.claude/skills instead) ──
+/code-review-skill-main/
+
 # ── Editor / OS ──
 .vscode/
 .idea/
