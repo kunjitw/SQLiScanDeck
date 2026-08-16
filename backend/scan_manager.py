@@ -1,7 +1,7 @@
 """
 Scan manager: the orchestration core.
 
- * owns the sqlmap REST API server process (started lazily, once)
+ * runs each scan as ONE direct CLI subprocess (sqlmap.py / ghauri), no REST API
  * runs scans in a bounded thread pool so MANY can run concurrently while
    extras queue instead of blocking the UI ("don't wait for the previous one")
  * gives each scan a ScanContext that streams a full timestamped log to disk
@@ -12,10 +12,9 @@ import json
 import os
 import re
 import shlex
-import subprocess
+import shutil
 import threading
 import time
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import config
@@ -68,11 +67,8 @@ class ScanContext:
 
         self.python_exe = config.PYTHON_EXE
         self.tools_dir = config.TOOLS_DIR
-        self.sqlmapapi_base = "http://{}:{}".format(
-            settings["sqlmapapi_host"], settings["sqlmapapi_port"])
 
-        self.engine_task_id = None   # sqlmap task id
-        self.engine_proc = None      # ghauri subprocess
+        self.engine_proc = None      # ghauri / sqlmap subprocess
         self.deleted = False         # set when the scan is deleted mid-run
         self._stop = threading.Event()
         self._log_lock = threading.Lock()
@@ -119,8 +115,11 @@ class ScanContext:
                        ended_at=ended, duration_ms=ended - started)
 
     def finish(self, status, vulnerable, findings):
+        """Persist the terminal result. Returns the list of (param_name, status)
+        pairs actually written to the dedup history (so the driver's 【判定】 block
+        can report the truth), or None when nothing was recorded."""
         if self.deleted:          # deleted mid-run -> skip all DB writes (no orphans)
-            return
+            return None
         ended = _now_ms()
         started = self.scan.get("started_at") or ended
         db.update_scan(
@@ -131,25 +130,57 @@ class ScanContext:
             ended_at=ended,
             duration_ms=ended - started,
         )
-        # Only a genuine completion tells us anything about the params. A killed
-        # / stopped / error scan must NOT record them as "clean" -- that would
-        # poison the "have I tested this before?" dedup with false negatives.
-        if status == "done":
-            self._record_param_history(vulnerable, findings)
+        # A clean completion tells us about every tested param; separately, a
+        # CONFIRMED vuln must be recorded even if the run then errored/was killed
+        # (never lose a real injection). A killed/error scan with NO vuln records
+        # nothing, so it can't poison the dedup history with false negatives.
+        if status == "done" or vulnerable:
+            return self._record_param_history(vulnerable, findings)
+        return None
 
     def _record_param_history(self, vulnerable, findings):
-        vuln_names = _vuln_param_names(findings) if vulnerable else set()
+        summary_vuln = _vuln_param_names(findings) if vulnerable else set()
+        explicit = (findings or {}).get("per_param") or {}   # {name: vulnerable|clean}
+        recorded = []
         for p in self.params:
+            name = p["name"]
+            location = p.get("location", "?")
             if not p.get("selected"):
-                continue  # only record params we actually tested
-            is_vuln = bool(vulnerable and p.get("name") in vuln_names)
-            status = "vulnerable" if is_vuln else "clean"
+                # parsed but the user chose NOT to test it -> record 'skipped'
+                # (distinct from never-seen 'untested'); never downgrades a real
+                # result and doesn't count as a test.
+                try:
+                    db.mark_param_skipped(self.project_id, self.sig_endpoint,
+                                          self.endpoint, name, location, self.id)
+                except Exception:
+                    pass
+                continue
+            # Precise per-param verdict:
+            #  - in the injection summary OR explicit "is vulnerable" -> vulnerable
+            #  - explicit "not injectable", OR the whole scan found nothing and ran
+            #    to completion (so every selected param really was tested) -> clean
+            #  - otherwise a vuln was found in ANOTHER param; with --batch the tool
+            #    answers "keep testing others? N" and stops, so THIS param may not
+            #    have been tested -> 'tested' (inconclusive), never a false 'clean'.
+            if name in summary_vuln or explicit.get(name) == "vulnerable":
+                status, is_vuln = "vulnerable", True
+            elif explicit.get(name) == "clean" or not vulnerable:
+                status, is_vuln = "clean", False
+            else:
+                status, is_vuln = "tested", False
             try:
+                # latest aggregate (drives the parse-screen badges)
                 db.upsert_param_status(
                     self.project_id, self.sig_endpoint, self.endpoint,
-                    p["name"], p.get("location", "?"), status, is_vuln, self.id)
+                    name, location, status, is_vuln, self.id)
+                # append to the immutable per-scan timeline (drives the drill-down)
+                db.add_param_test(
+                    self.project_id, self.sig_endpoint, self.endpoint,
+                    name, location, self.id, self.tool, status, is_vuln)
+                recorded.append((name, status))
             except Exception:
                 pass
+        return recorded
 
 
 # --------------------------------------------------------------------------
@@ -168,14 +199,13 @@ class ScanManager:
         self.pool = ThreadPoolExecutor(max_workers=workers)
         self.contexts = {}          # scan_id -> ScanContext
         self._ctx_lock = threading.Lock()
-        self._api_proc = None
-        self._api_started = False
-        self._api_lock = threading.Lock()
 
     # ---- lifecycle ----
     def start(self):
         db.init_db()
-        # sqlmap API is started lazily on first sqlmap scan (see ensure_sqlmapapi)
+        # a previous run's in-flight scans can't resume (their processes are
+        # gone) -> mark leftover running/queued as killed so the UI is honest
+        db.reset_stale_scans()
 
     def shutdown(self):
         # stop the flag AND actually kill any live ghauri/sqlmap engine process,
@@ -188,57 +218,9 @@ class ScanManager:
                     proc.terminate()
                 except Exception:
                     pass
-        if self._api_proc and self._api_proc.poll() is None:
-            try:
-                self._api_proc.terminate()
-            except Exception:
-                pass
 
     def reload_settings(self):
         self.settings = config.load_settings()
-
-    # ---- sqlmap REST API server ----
-    def _api_alive(self):
-        base = "http://{}:{}".format(self.settings["sqlmapapi_host"],
-                                     self.settings["sqlmapapi_port"])
-        try:
-            with urllib.request.urlopen(base + "/version", timeout=2) as r:
-                return r.status == 200
-        except Exception:
-            return False
-
-    def ensure_sqlmapapi(self):
-        with self._api_lock:
-            if self._api_alive():
-                return True
-            if not os.path.isfile(config.SQLMAPAPI_PY):
-                return False
-            # go through the launcher so SQLMAP_DIR is on sys.path (embeddable
-            # python's ._pth won't add it -> sqlmapapi.py can't `import lib`)
-            cmd = [config.PYTHON_EXE, config.SQLMAPAPI_LAUNCH, "-s",
-                   "-H", self.settings["sqlmapapi_host"],
-                   "-p", str(self.settings["sqlmapapi_port"])]
-            # keep the API's output in a log so a startup failure stays visible
-            # (it used to go to DEVNULL, which hid exactly this kind of crash)
-            try:
-                config.ensure_dirs()
-                logf = open(os.path.join(config.LOG_DIR, "sqlmapapi.log"),
-                            "a", encoding="utf-8", errors="ignore")
-            except Exception:
-                logf = subprocess.DEVNULL
-            try:
-                self._api_proc = subprocess.Popen(
-                    cmd, cwd=config.SQLMAP_DIR,
-                    stdout=logf, stderr=subprocess.STDOUT)
-            except Exception:
-                return False
-            # wait up to ~10s for it to come up
-            for _ in range(20):
-                if self._api_alive():
-                    self._api_started = True
-                    return True
-                time.sleep(0.5)
-            return self._api_alive()
 
     # ---- launching scans ----
     def prepare_target(self, parsed):
@@ -256,7 +238,7 @@ class ScanManager:
                 "tested_before": len(related) > 0}
 
     def create_scan(self, parsed, tool, options, params, project_id=None,
-                    extra_flags="", restrict_ip=""):
+                    extra_flags="", restrict_ip="", note=""):
         signature, sig_endpoint, endpoint = self.prepare_target(parsed)
         row = db.create_scan({
             "project_id": project_id,
@@ -270,13 +252,18 @@ class ScanManager:
             "params": params,
             "extra_flags": extra_flags,
             "restrict_ip": restrict_ip,
+            "note": note,
         })
         # write the raw request file used by -r (faithful reconstruction)
         config.ensure_dirs()
         raw = build_raw_request(parsed)
         req_path = os.path.join(config.REQ_DIR, "req_{}.txt".format(row["id"]))
         try:
-            with open(req_path, "w", encoding="utf-8", errors="ignore", newline="\r\n") as f:
+            # build_raw_request already emits CRLF; write VERBATIM (newline="") so the
+            # text-mode layer does not translate \n again and produce \r\r\n. sqlmap
+            # tolerates the doubled CR but ghauri rejects it ("does not contain a
+            # usable HTTP request"), which broke every ghauri -r scan on Windows.
+            with open(req_path, "w", encoding="utf-8", errors="ignore", newline="") as f:
                 f.write(raw)
         except Exception:
             pass
@@ -304,12 +291,7 @@ class ScanManager:
         ctx.scan["started_at"] = started
         try:
             if ctx.tool == "sqlmap":
-                if not self.ensure_sqlmapapi():
-                    ctx.append_log("!! 無法啟動 sqlmap REST API(tools/sqlmap 不存在或啟動失敗)")
-                    ctx.append_log("   請先執行 bootstrap.bat 下載 sqlmap。")
-                    ctx.fail("sqlmap REST API 無法啟動")
-                    return
-                sqlmap_driver.run(ctx)
+                sqlmap_driver.run(ctx)   # direct CLI subprocess (no REST API)
             elif ctx.tool == "ghauri":
                 ghauri_driver.run(ctx)
             else:
@@ -348,6 +330,13 @@ class ScanManager:
                     os.remove(path)
             except Exception:
                 pass
+        # per-scan sqlmap output tree (session.sqlite, target.txt, dump/, ...)
+        sqlmap_dir = os.path.join(config.DATA_DIR, "sqlmap_output", str(scan_id))
+        try:
+            if os.path.isdir(sqlmap_dir):
+                shutil.rmtree(sqlmap_dir, ignore_errors=True)
+        except Exception:
+            pass
 
     def delete_scan(self, scan_id):
         """Remove a scan entirely. If still live, mark its context deleted (so the

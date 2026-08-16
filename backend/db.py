@@ -72,6 +72,7 @@ def init_db():
                 params_json TEXT,              -- [{name,location,value,selected}]
                 extra_flags TEXT DEFAULT '',
                 restrict_ip TEXT DEFAULT '',
+                note TEXT DEFAULT '',          -- user's free-text note for this run
                 status TEXT NOT NULL,          -- queued|running|done|error|killed|stopped
                 vulnerable INTEGER DEFAULT 0,
                 result_json TEXT,              -- parsed findings
@@ -99,6 +100,22 @@ def init_db():
                 UNIQUE(project_id, sig_endpoint, name, location)
             );
 
+            -- append-only per-(scan,param) log so we can show a parameter's full
+            -- test timeline (param_status above keeps only the LATEST aggregate).
+            CREATE TABLE IF NOT EXISTS param_test (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER,
+                sig_endpoint TEXT NOT NULL,
+                endpoint TEXT,
+                name TEXT NOT NULL,
+                location TEXT NOT NULL,
+                scan_id INTEGER NOT NULL,
+                tool TEXT,
+                status TEXT NOT NULL,           -- vulnerable | clean | tested
+                vulnerable INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS templates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -112,6 +129,8 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_scans_sigep ON scans(sig_endpoint);
             CREATE INDEX IF NOT EXISTS idx_scans_project ON scans(project_id);
             CREATE INDEX IF NOT EXISTS idx_pstatus_ep ON param_status(project_id, sig_endpoint);
+            CREATE INDEX IF NOT EXISTS idx_ptest_ep ON param_test(project_id, sig_endpoint, name, location);
+            CREATE INDEX IF NOT EXISTS idx_ptest_scan ON param_test(scan_id);
             """
         )
         # migrate older DBs that predate the templates.tool column
@@ -119,9 +138,16 @@ def init_db():
             conn.execute("ALTER TABLE templates ADD COLUMN tool TEXT DEFAULT ''")
         except Exception:
             pass
+        # migrate older DBs that predate the scans.note column
+        try:
+            conn.execute("ALTER TABLE scans ADD COLUMN note TEXT DEFAULT ''")
+        except Exception:
+            pass
         conn.commit()
         _seed_default_rules()
         _seed_default_templates()
+        _seed_preset_templates()
+        _migrate_preset_desc()
 
 
 def _seed_default_rules():
@@ -164,6 +190,118 @@ def _seed_default_templates():
         ("範例 · 基本偵測(系統預設)", "sqlmap", 1,
          json.dumps(example, ensure_ascii=False), _now()),
     )
+    _conn.commit()
+
+
+# Curated scenario presets (option keys match the composer / drivers exactly).
+# Values validated against each tool: sqlmap level 1-5 / risk 1-3 / technique
+# BEUSTQ / tamper+is_dba allowed; ghauri level 1-3 / technique B,E,S,T only (no U)
+# / NO risk, tamper, is_dba.
+# (name, tool, options, danger) -- danger: safe | normal | high (display + warn)
+# The "安全預設(唯讀)" per tool is a genuinely SAFE default (研究-grounded): lowest
+# intrusiveness (level 1 / risk 1), READ-ONLY technique (drops S=stacked so no
+# multi-statement writes), random_agent (near pure-upside: dodges the trivially-
+# blocked default UA, one UA per session so page comparison stays consistent),
+# and NO enumeration. It is marked each tool's default.
+_PRESET_TEMPLATES = [
+    # (name, tool, options, danger, description)
+    ("安全預設(唯讀)", "sqlmap", {"level": 1, "risk": 1, "technique": "BEUTQ", "random_agent": True}, "safe",
+     "最低侵入性、唯讀起手式:level 1、risk 1、technique 去掉堆疊(BEUTQ)保證不改資料、隨機 UA。日常首選。"),
+    ("安全預設(唯讀)", "ghauri", {"level": 1, "technique": "BET", "random_agent": True}, "safe",
+     "最低侵入、唯讀:level 1、technique BET(去堆疊查詢)、隨機 UA。日常首選。"),
+    # sqlmap scenarios
+    ("快速冒煙", "sqlmap", {"technique": "BEU", "threads": 5, "retries": 2, "timeout": 15}, "safe",
+     "只用 B/E/U 快技法、砍掉最慢的時間盲注,threads 5、timeout 15。大量端點初篩,寧漏要快。"),
+    ("標準偵測", "sqlmap", {"level": 2, "threads": 5}, "normal",
+     "level 2(加測 Cookie)、threads 5、完整 technique;合理覆蓋但先不列舉。單一目標常規偵測。"),
+    ("深度高覆蓋", "sqlmap", {"level": 5, "risk": 3, "threads": 5}, "high",
+     "level 5 + risk 3,最大偵測率;⚠ risk 3 的 OR-based 可能影響多列資料,僅在明確授權且可接受風險時用。"),
+    ("純偵測不改資料", "sqlmap", {"level": 2, "technique": "BEUTQ", "threads": 3}, "safe",
+     "technique BEUTQ 移除堆疊查詢(S),從技術上保證唯讀不寫入;level 2。生產環境用。"),
+    ("疑似有 WAF", "sqlmap", {"random_agent": True, "tamper": "space2comment,between,randomcase",
+                              "threads": 1, "delay": 1, "time_sec": 8}, "normal",
+     "random-agent + tamper(space2comment/between/randomcase)+ threads 1 + delay 1,規避 UA/簽章/速率封鎖。"),
+    ("確認後列舉", "sqlmap", {"get_banner": True, "get_current_user": True, "get_current_db": True,
+                             "is_dba": True, "get_dbs": True, "threads": 3}, "normal",
+     "已確認可注入後,抓 banner / current-user / current-db / is-dba / dbs,取報告必要證據。"),
+    ("盲注專用", "sqlmap", {"technique": "BT", "time_sec": 10, "threads": 1, "retries": 3}, "normal",
+     "只用 B(布林)+T(時間),time-sec 10、單執行緒穩定時間量測;無回顯、UNION/報錯皆失敗時用。"),
+    # ghauri scenarios
+    ("快速冒煙", "ghauri", {"level": 1, "technique": "BE", "threads": 5, "timeout": 15, "retries": 1}, "safe",
+     "level 1、technique BE、threads 5、retries 1;幾秒內拿到 yes/no。"),
+    ("標準偵測", "ghauri", {"level": 2, "threads": 3}, "normal",
+     "level 2、threads 3、預設 BEST;速度與覆蓋平衡的起手式。"),
+    ("深度偵測", "ghauri", {"level": 3, "technique": "BEST", "time_sec": 8, "retries": 4}, "normal",
+     "level 3(上限)、technique BEST、time-sec 8、retries 4;逼出隱藏或難觸發的注入。"),
+    ("純偵測不改資料", "ghauri", {"level": 2, "technique": "BET"}, "safe",
+     "technique BET 移除堆疊查詢(S),唯讀不寫入;level 2。"),
+    ("慢速避偵測", "ghauri", {"level": 1, "technique": "BT", "threads": 1, "delay": 4,
+                             "retries": 2, "random_agent": True}, "safe",
+     "delay 4、threads 1、random-agent、technique BT;壓低請求頻率與指紋,避 WAF/速率限制。"),
+    ("確認後列舉", "ghauri", {"level": 2, "get_banner": True, "get_current_user": True,
+                             "get_current_db": True, "get_dbs": True}, "normal",
+     "已確認可注入後,抓 banner / current-user / current-db / dbs。"),
+]
+
+_DEFAULT_PRESET_BY_TOOL = {"sqlmap": "安全預設(唯讀)", "ghauri": "安全預設(唯讀)"}
+
+
+def _seed_preset_templates():
+    """Add the curated scenario presets ONCE, guarded by PRAGMA user_version so
+    existing DBs also receive them, but deleting one never brings it back. Marks
+    each tool's SAFE preset as that tool's default (both tools get a default)."""
+    ver = _conn.execute("PRAGMA user_version").fetchone()[0]
+    if ver >= 1:
+        return
+    for name, tool, opts, danger, desc in _PRESET_TEMPLATES:
+        exists = _conn.execute(
+            "SELECT 1 FROM templates WHERE name=? AND tool=?", (name, tool)).fetchone()
+        if not exists:
+            _conn.execute(
+                "INSERT INTO templates(name,tool,is_default,data_json,created_at)"
+                " VALUES(?,?,0,?,?)",
+                (name, tool,
+                 json.dumps({"tool": tool, "danger": danger, "desc": desc, "options": opts},
+                            ensure_ascii=False), _now()),
+            )
+    # give each tool the SAFE preset as its default -- but ONLY when there is no
+    # default yet, or the only default is the seeded example. Never clobber a
+    # default the user chose for their own template.
+    for tool, defname in _DEFAULT_PRESET_BY_TOOL.items():
+        cur = _conn.execute(
+            "SELECT name FROM templates WHERE tool=? AND is_default=1 LIMIT 1",
+            (tool,)).fetchone()
+        if cur is None or cur["name"] == "範例 · 基本偵測(系統預設)":
+            _conn.execute("UPDATE templates SET is_default=0 WHERE tool=?", (tool,))
+            _conn.execute("UPDATE templates SET is_default=1 WHERE tool=? AND name=?",
+                          (tool, defname))
+    _conn.execute("PRAGMA user_version = 1")
+    _conn.commit()
+
+
+def _migrate_preset_desc():
+    """v1 presets were seeded before descriptions existed. Backfill data_json.desc
+    (and danger) for the built-in presets still missing it -> user_version 2. Only
+    touches presets that lack a desc, so a user's own edits are left alone."""
+    ver = _conn.execute("PRAGMA user_version").fetchone()[0]
+    if ver >= 2:
+        return
+    for name, tool, opts, danger, desc in _PRESET_TEMPLATES:
+        row = _conn.execute(
+            "SELECT id,data_json FROM templates WHERE name=? AND tool=?",
+            (name, tool)).fetchone()
+        if not row:
+            continue
+        try:
+            data = json.loads(row["data_json"] or "{}")
+        except Exception:
+            data = {}
+        if not data.get("desc"):
+            data["desc"] = desc
+            data.setdefault("danger", danger)
+            _conn.execute("UPDATE templates SET data_json=? WHERE id=?",
+                          (json.dumps(data, ensure_ascii=False), row["id"]))
+    _conn.execute("PRAGMA user_version = 2")
     _conn.commit()
 
 
@@ -280,8 +418,8 @@ def create_scan(scan):
     with _lock:
         cur = _conn.execute(
             """INSERT INTO scans(project_id,tool,method,url,endpoint,signature,sig_endpoint,
-                    options_json,params_json,extra_flags,restrict_ip,status,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    options_json,params_json,extra_flags,restrict_ip,note,status,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 scan.get("project_id"),
                 scan.get("tool"),
@@ -294,6 +432,7 @@ def create_scan(scan):
                 json.dumps(scan.get("params", []), ensure_ascii=False),
                 scan.get("extra_flags", ""),
                 scan.get("restrict_ip", ""),
+                scan.get("note", ""),
                 "queued",
                 _now(),
             ),
@@ -309,8 +448,40 @@ def get_scan(sid):
 
 # columns the board/tree actually render — lets the 1.5s poll skip the heavy
 # options_json / params_json / result_json blobs on every cycle
+# slim fetches the param/result blobs too, but only to derive the compact `pouts`
+# (tested-param outcomes for the sidebar card); the heavy blobs are dropped before return.
 _SCAN_SLIM_COLS = ("id, project_id, tool, method, url, endpoint, status, "
-                   "vulnerable, duration_ms, created_at, started_at, ended_at")
+                   "vulnerable, duration_ms, created_at, started_at, ended_at, "
+                   "params_json, result_json")
+
+
+def _param_outcomes(row):
+    """Compact per-parameter outcome for the sidebar card: only the params actually
+    TESTED (selected), each as {n: name, v: has_injection_point}. Skipped params omitted."""
+    try:
+        params = json.loads(row.get("params_json") or "[]") or []
+    except Exception:
+        params = []
+    try:
+        res = json.loads(row.get("result_json") or "{}") or {}
+    except Exception:
+        res = {}
+    # res["parameters"] holds the raw log form "id (GET)"; params_json names are bare
+    # ("id"), so strip the "(location)" suffix before comparing or a vulnerable param
+    # renders as clean on multi-param scans.
+    vuln = {str(p).split(" (")[0].strip() for p in (res.get("parameters") or [])}
+    per = res.get("per_param") or {}
+    out = []
+    for p in params:
+        if not p.get("selected"):
+            continue
+        name = p.get("name")
+        out.append({"n": name, "v": bool(name in vuln or per.get(name) == "vulnerable")})
+    # single-param inference: scan is vulnerable but the tool named no param (common with
+    # ghauri) and exactly one param was tested -> that param is the injectable one.
+    if row.get("vulnerable") and len(out) == 1 and not out[0]["v"]:
+        out[0]["v"] = True
+    return out
 
 
 def list_scans(project_id=None, status=None, limit=200, slim=False):
@@ -327,7 +498,13 @@ def list_scans(project_id=None, status=None, limit=200, slim=False):
             q += " WHERE " + " AND ".join(conds)
         q += " ORDER BY created_at DESC LIMIT ?"
         args.append(limit)
-        return _rows(_conn.execute(q, args).fetchall())
+        rows = _rows(_conn.execute(q, args).fetchall())
+        if slim:
+            for r in rows:
+                r["pouts"] = _param_outcomes(r)
+                r.pop("params_json", None)
+                r.pop("result_json", None)
+        return rows
 
 
 def update_scan(sid, **fields):
@@ -346,7 +523,30 @@ def update_scan(sid, **fields):
 def delete_scan(sid):
     with _lock:
         _conn.execute("DELETE FROM scans WHERE id=?", (sid,))
+        # drop this scan's rows from the per-parameter timeline too, so the
+        # drill-down never links to a now-missing scan (param_status aggregate is
+        # a summary and is intentionally left as-is).
+        _conn.execute("DELETE FROM param_test WHERE scan_id=?", (sid,))
         _conn.commit()
+
+
+def reset_stale_scans():
+    """Any scan still 'running' or 'queued' at startup is a leftover from a
+    previous run whose process is gone -> it can't resume/start, so mark it
+    killed with a note. Keeps the board/tree honest instead of showing a
+    zombie 'running'/'queued' that never progresses."""
+    with _lock:
+        now = _now()
+        cur = _conn.execute(
+            "UPDATE scans SET status='killed', "
+            "ended_at=COALESCE(ended_at, ?), "
+            "duration_ms=CASE WHEN started_at IS NOT NULL THEN ? - started_at ELSE duration_ms END, "
+            "error=CASE WHEN COALESCE(error,'')='' THEN '伺服器重啟時中斷' ELSE error END "
+            "WHERE status IN ('running','queued')",
+            (now, now),
+        )
+        _conn.commit()
+        return cur.rowcount
 
 
 def scans_by_signature(signature, sig_endpoint, project_id=None, exclude_id=None, limit=50):
@@ -373,11 +573,21 @@ def upsert_param_status(project_id, sig_endpoint, endpoint, name, location,
     with _lock:
         now = _now()
         existing = _conn.execute(
-            "SELECT id,test_count FROM param_status WHERE "
+            "SELECT id,vulnerable,status FROM param_status WHERE "
             "project_id IS ? AND sig_endpoint=? AND name=? AND location=?",
             (project_id, sig_endpoint, name, location),
         ).fetchone()
         if existing:
+            # NEVER downgrade a confirmed injection: once a param was vulnerable it
+            # stays flagged (badge = 曾有漏洞), even if a later/flaky re-run doesn't
+            # reproduce it. Still bump test_count / last_scan_id for the re-test.
+            if existing["vulnerable"] and not vulnerable:
+                status, vulnerable = "vulnerable", True
+            # An inconclusive 'tested' must not downgrade a definitive 'clean': with
+            # --batch the tool may skip re-testing this param after a hit in another
+            # one, which is not evidence the earlier clean result was wrong.
+            elif existing["status"] == "clean" and status == "tested":
+                status = "clean"
             _conn.execute(
                 "UPDATE param_status SET status=?, vulnerable=?, last_scan_id=?, "
                 "endpoint=?, test_count=test_count+1, updated_at=? WHERE id=?",
@@ -394,12 +604,74 @@ def upsert_param_status(project_id, sig_endpoint, endpoint, name, location,
         _conn.commit()
 
 
+def mark_param_skipped(project_id, sig_endpoint, endpoint, name, location, scan_id):
+    """Record that a parsed parameter was SEEN but not selected this run -> mark
+    it 'skipped' (distinct from never-seen 'untested'). Never downgrades a param
+    that was actually tested (vulnerable/clean/tested), and does NOT bump
+    test_count (it wasn't tested)."""
+    with _lock:
+        now = _now()
+        existing = _conn.execute(
+            "SELECT id,status FROM param_status WHERE "
+            "project_id IS ? AND sig_endpoint=? AND name=? AND location=?",
+            (project_id, sig_endpoint, name, location),
+        ).fetchone()
+        if existing:
+            if existing["status"] in ("vulnerable", "clean", "tested"):
+                return  # keep the real result; don't downgrade to skipped
+            _conn.execute(
+                "UPDATE param_status SET status='skipped', last_scan_id=?, "
+                "endpoint=?, updated_at=? WHERE id=?",
+                (scan_id, endpoint, now, existing["id"]),
+            )
+        else:
+            _conn.execute(
+                "INSERT INTO param_status(project_id,sig_endpoint,endpoint,name,location,"
+                "status,vulnerable,last_scan_id,test_count,updated_at)"
+                " VALUES(?,?,?,?,?,'skipped',0,?,0,?)",
+                (project_id, sig_endpoint, endpoint, name, location, scan_id, now),
+            )
+        _conn.commit()
+
+
 def param_history(project_id, sig_endpoint):
     with _lock:
         rs = _conn.execute(
             "SELECT * FROM param_status WHERE project_id IS ? AND sig_endpoint=? "
             "ORDER BY name",
             (project_id, sig_endpoint),
+        ).fetchall()
+        out = _rows(rs)
+        for r in out:
+            r["vulnerable"] = bool(r["vulnerable"])
+        return out
+
+
+def add_param_test(project_id, sig_endpoint, endpoint, name, location,
+                   scan_id, tool, status, vulnerable):
+    """Append one immutable record of THIS scan's verdict for THIS parameter, so
+    a per-parameter timeline can be shown (param_status keeps only the latest)."""
+    with _lock:
+        _conn.execute(
+            "INSERT INTO param_test(project_id,sig_endpoint,endpoint,name,location,"
+            "scan_id,tool,status,vulnerable,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (project_id, sig_endpoint, endpoint, name, location,
+             scan_id, tool, status, 1 if vulnerable else 0, _now()),
+        )
+        _conn.commit()
+
+
+def param_test_log(project_id, sig_endpoint, name, location):
+    """Full chronological test history for one parameter (newest first), joined
+    to each scan's url/status for display + linking."""
+    with _lock:
+        rs = _conn.execute(
+            "SELECT pt.*, s.url AS scan_url, s.status AS scan_status "
+            "FROM param_test pt LEFT JOIN scans s ON s.id = pt.scan_id "
+            "WHERE pt.project_id IS ? AND pt.sig_endpoint=? AND pt.name=? AND pt.location=? "
+            "ORDER BY pt.created_at DESC, pt.id DESC",
+            (project_id, sig_endpoint, name, location),
         ).fetchall()
         out = _rows(rs)
         for r in out:

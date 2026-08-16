@@ -30,10 +30,15 @@ def build_args(ctx):
     if sel and desel:                       # only narrow if user narrowed
         args += ["-p", ",".join(sel)]
 
-    if ctx.scheme == "https" or o.get("force_ssl"):
-        args += ["--force-ssl"]
+    # NOTE: ghauri already defaults to https for -r requests, and its --force-ssl
+    # only toggles TLS CERT VERIFICATION (default: accept any cert). We deliberately
+    # do NOT pass it: enabling verification would break self-signed / bad-cert
+    # targets (common in authorized testing). The "強制 HTTPS" toggle is effectively
+    # a no-op for ghauri (it's https regardless), so mapping it here would only harm.
     if o.get("random_agent"):
         args += ["--random-agent"]
+    if o.get("text_only"):
+        args += ["--text-only"]
 
     # value options (only if provided)
     def add(flag, key, cast=str):
@@ -53,16 +58,66 @@ def build_args(ctx):
     add("--prefix", "prefix")
     add("--suffix", "suffix")
     add("--proxy", "proxy")
+    # detection tuning + request control (ghauri supports these; NOT skip/regexp/auth/csrf)
+    _hdr = o.get("headers")
+    if _hdr not in (None, ""):   # textarea: one header per line -> literal \n
+        args.extend(["--headers", str(_hdr).replace("\r\n", "\n").replace("\n", "\\n")])
+    add("--ignore-code", "ignore_code")
+    add("--string", "test_string")
+    add("--not-string", "not_string")
+    add("--code", "code", int)
 
     # enumeration flags (store_true)
     for key, flag in (("get_banner", "--banner"),
                       ("get_current_user", "--current-user"),
                       ("get_current_db", "--current-db"),
                       ("get_hostname", "--hostname"),
-                      ("get_dbs", "--dbs")):
+                      ("get_dbs", "--dbs"),
+                      ("dump", "--dump")):
         if o.get(key):
             args.append(flag)
     return args
+
+
+def _ensure_http_referer(ctx):
+    """ghauri defaults -r requests to HTTPS and has NO flag to force http; its only
+    documented downgrade is a matching 'Referer: http://<host>/'. So when the target
+    is http, inject one — otherwise ghauri tries https and dies with 'target URL is
+    not responding' on any plain-http / localhost target."""
+    if ctx.scheme == "https":
+        return
+    try:
+        with open(ctx.request_file, "r", encoding="utf-8", errors="ignore", newline="") as f:
+            raw = f.read()
+    except Exception:
+        return
+    lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    host = ""
+    for ln in lines:
+        if ln.lower().startswith("host:"):
+            host = ln.split(":", 1)[1].strip()
+            break
+    if not host:
+        return
+    if any(ln.lower().startswith("referer:") and "http://" in ln.lower() for ln in lines):
+        return                                  # already has an http Referer
+    referer = "Referer: http://{}/".format(host)
+    out, inserted = [], False
+    for ln in lines:
+        if ln.lower().startswith("referer:"):   # drop EVERY existing (non-http) Referer, no duplicates
+            continue
+        out.append(ln)
+        if ln.lower().startswith("host:") and not inserted:   # insert the single canonical one after Host
+            out.append(referer)
+            inserted = True
+    if not inserted:                            # defensive: no Host line matched -> put it right after the request line
+        out.insert(1, referer)
+    try:
+        with open(ctx.request_file, "w", encoding="utf-8", errors="ignore", newline="") as f:
+            f.write("\r\n".join(out))
+        ctx.append_log("備忘・已注入 {} 讓 ghauri 走 http(ghauri 對 -r 預設 https、無強制 http 旗標)".format(referer))
+    except Exception:
+        pass
 
 
 def _pump(pipe, q):
@@ -79,13 +134,16 @@ def run(ctx):
     ctx.append_log("=== ghauri 掃描開始 ===")
     ctx.append_log("目標:{} {}".format(ctx.method, ctx.url))
     if ctx.restrict_ip:
-        ctx.append_log("限制測試來源 IP:{}".format(ctx.restrict_ip))
+        # audit/memo only -- ghauri cannot bind an outbound source IP, so this
+        # is a note, not an enforced restriction.
+        ctx.append_log("備忘・允許測試來源 IP:{}".format(ctx.restrict_ip))
 
+    _ensure_http_referer(ctx)   # make ghauri use http on plain-http targets (it defaults https)
     args = build_args(ctx)
     # Run ghauri from its GitHub source (tools/ghauri) via our launcher, using
     # the portable python. ghauri itself is NOT pip-installed.
     cmd = [ctx.python_exe, config.GHAURI_LAUNCH] + args + ctx.extra_flag_list()
-    ctx.append_log("指令:{}".format(" ".join(cmd)))
+    ctx.append_log("指令:{}".format(base.display_cmd(cmd)))
 
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -131,7 +189,8 @@ def run(ctx):
             line = q.get(timeout=0.5)
         except queue.Empty:
             if proc.poll() is not None:
-                # process ended; drain remaining
+                # process ended; let the reader enqueue the tail + sentinel, then drain
+                reader.join(timeout=2)
                 _drain(q, ctx)
                 break
             continue
@@ -147,16 +206,41 @@ def run(ctx):
         except Exception:
             pass
 
+    # Compute the verdict from the pre-annotation log, THEN append the 【判定】
+    # block (so quoting an English marker in the block can't re-flip this scan).
     log_text = ctx.read_log()
-    vulnerable = base.looks_vulnerable(log_text)
+    vuln_marker, vuln_line = base.vuln_evidence(log_text)
     findings = base.extract_findings(log_text)
+    vulnerable, vuln_marker = base.merge_vuln(vuln_marker, findings)  # fold per-param confirmation in
+    waf_marker, _waf_line = base.waf_evidence(log_text)
 
     if killed:
-        ctx.finish(status="killed", vulnerable=vulnerable, findings=findings)
+        recorded = ctx.finish(status="killed", vulnerable=vulnerable, findings=findings)
+        base.append_verdict(ctx, tool="ghauri", vulnerable=vulnerable,
+                            vuln_marker=vuln_marker, vuln_line=vuln_line,
+                            status="killed", returncode=None,
+                            fail_marker=None, fail_line=None, clean_hit=False,
+                            waf_marker=waf_marker, findings=findings,
+                            recorded_history=recorded)
     else:
         rc = proc.returncode
         ctx.append_log("=== ghauri 掃描結束 (returncode={}) ===".format(rc))
-        ctx.finish(status="done", vulnerable=vulnerable, findings=findings)
+        # Count as a real "done" only if the target was actually reached & tested.
+        # ghauri exits 0 even on connection failure AND phrases the failure very
+        # differently from sqlmap, so this relies on base._FAILURE_MARKERS also
+        # covering ghauri's wording. clean_hit overrides a stray retry substring;
+        # a found vuln is preserved via the vulnerable flag regardless.
+        fail_marker, fail_line = base.fail_evidence(log_text)
+        clean_hit = base.looks_clean(log_text)
+        failed = (rc != 0) or (fail_marker is not None and not vulnerable and not clean_hit)
+        status = "error" if failed else "done"
+        recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
+        base.append_verdict(ctx, tool="ghauri", vulnerable=vulnerable,
+                            vuln_marker=vuln_marker, vuln_line=vuln_line,
+                            status=status, returncode=rc,
+                            fail_marker=fail_marker, fail_line=fail_line,
+                            clean_hit=clean_hit, waf_marker=waf_marker,
+                            findings=findings, recorded_history=recorded)
 
 
 def _drain(q, ctx):

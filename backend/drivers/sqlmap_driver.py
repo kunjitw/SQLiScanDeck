@@ -1,242 +1,229 @@
 """
-sqlmap driver -- talks to the sqlmap REST API (sqlmapapi.py -s).
-
-Each scan is a *task* in a separate sqlmap process, so many can run at once
-without blocking each other. We stream the task log into the scan's log file
-and read /scan/<id>/data at the end for structured findings.
-
-Runs synchronously inside a worker thread (the scan manager owns concurrency);
-cancellation is cooperative via ctx.should_stop().
+sqlmap driver -- run sqlmap's CLI (sqlmap.py) directly, ONE subprocess per scan,
+streaming its stdout into the scan log. Same model as the ghauri driver (no REST
+API). Launched on the portable python via sqlmap_launch.py so sqlmap can import
+its own `lib`. Cancellation terminates the process.
 """
-import json
 import os
-import time
-import urllib.request
-import urllib.error
+import queue
+import subprocess
+import threading
 
+import config
 from drivers import base
 
 TOOL = "sqlmap"
 
 
-def equivalent_cmdline(ctx, opts):
-    """A readable, copy-pasteable sqlmap CLI that is EQUIVALENT to what the REST
-    API is asked to run (sqlmap actually runs via its API here). Shown to the
-    user so they can see exactly what is being tested."""
-    parts = ["sqlmap", "-r", os.path.basename(ctx.request_file), "--batch"]
-    value_flags = [
-        ("level", "--level"), ("risk", "--risk"), ("technique", "--technique"),
-        ("dbms", "--dbms"), ("threads", "--threads"), ("tamper", "--tamper"),
-        ("timeout", "--timeout"), ("timeSec", "--time-sec"), ("delay", "--delay"),
-        ("retries", "--retries"), ("prefix", "--prefix"), ("suffix", "--suffix"),
-        ("proxy", "--proxy"),
-    ]
-    for key, flag in value_flags:
-        v = opts.get(key)
-        if v not in (None, ""):
-            parts.append("{}={}".format(flag, v))
-    if opts.get("testParameter"):
-        parts.append("-p {}".format(opts["testParameter"]))
-    if opts.get("skip"):
-        parts.append("--skip={}".format(opts["skip"]))
-    if opts.get("forceSSL"):
-        parts.append("--force-ssl")
-    if opts.get("randomAgent"):
-        parts.append("--random-agent")
-    for key, flag in (("getBanner", "--banner"), ("getCurrentUser", "--current-user"),
-                      ("getCurrentDb", "--current-db"), ("getHostname", "--hostname"),
-                      ("getDbs", "--dbs"), ("isDba", "--is-dba")):
-        if opts.get(key):
-            parts.append(flag)
-    return " ".join(parts)
-
-
-def _req(url, payload=None, timeout=15):
-    data = None
-    headers = {"Accept": "application/json"}
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    r = urllib.request.Request(url, data=data, headers=headers,
-                               method="POST" if payload is not None else "GET")
-    with urllib.request.urlopen(r, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", "ignore")
-    try:
-        return json.loads(raw)
-    except Exception:
-        return {"success": False, "raw": raw}
-
-
-def build_options(ctx):
-    """Map our scan options + request file onto sqlmap API option names."""
-    # Option (dest) names verified against sqlmap-1.10/lib/parse/cmdline.py.
+def build_args(ctx):
+    """sqlmap CLI args. Flags verified against sqlmap-1.10/lib/parse/cmdline.py."""
+    args = ["-r", ctx.request_file, "--batch", "--disable-coloring"]
     o = ctx.options or {}
-    opts = {
-        "batch": True,
-        "requestFile": ctx.request_file,      # faithful raw request => handles GET/POST/JSON/cookies/headers
-    }
-    if ctx.scheme == "https" or o.get("force_ssl"):
-        opts["forceSSL"] = True
 
     sel = base.selected_names(ctx.params)
     desel = base.deselected_names(ctx.params)
-    # Only constrain if the user actually narrowed the set.
-    if sel and desel:
-        opts["testParameter"] = ",".join(sel)
-    if desel:
-        opts["skip"] = ",".join(desel)
+    if sel and desel:                       # only narrow if the user narrowed
+        args += ["-p", ",".join(sel)]
 
+    if ctx.scheme == "https" or o.get("force_ssl"):
+        args += ["--force-ssl"]
     if o.get("random_agent"):
-        opts["randomAgent"] = True
+        args += ["--random-agent"]
+    if o.get("text_only"):
+        args += ["--text-only"]
 
-    # value options: our key -> (sqlmap dest, caster)
-    value_map = {
-        "level": ("level", int), "risk": ("risk", int),
-        "technique": ("technique", str), "dbms": ("dbms", str),
-        "threads": ("threads", int), "tamper": ("tamper", str),
-        "timeout": ("timeout", float), "time_sec": ("timeSec", int),
-        "delay": ("delay", float), "retries": ("retries", int),
-        "prefix": ("prefix", str), "suffix": ("suffix", str),
-        "proxy": ("proxy", str),
-    }
-    for our, (dest, cast) in value_map.items():
-        v = o.get(our)
-        # keep 0 -- retries=0 / delay=0 / time_sec=0 are meaningful choices.
-        # (the old `v not in (None,"",False)` dropped them because 0 == False)
-        if v is None or v == "":
-            continue
+    def add(flag, key, cast=str):
+        v = o.get(key)
+        if v is None or v == "":            # keep 0 (retries=0 / delay=0 are meaningful)
+            return
         try:
-            opts[dest] = cast(v)
+            args.append("{}={}".format(flag, cast(v)))
         except Exception:
-            opts[dest] = v
+            args.append("{}={}".format(flag, v))
 
-    # enumeration toggles (store_true)
-    enum_map = {
-        "get_banner": "getBanner", "get_current_user": "getCurrentUser",
-        "get_current_db": "getCurrentDb", "get_hostname": "getHostname",
-        "get_dbs": "getDbs", "is_dba": "isDba",
-    }
-    for our, their in enum_map.items():
-        if o.get(our):
-            opts[their] = True
-    return opts
+    add("--level", "level", int)
+    add("--risk", "risk", int)
+    add("--technique", "technique")
+    add("--dbms", "dbms")
+    add("--threads", "threads", int)
+    add("--tamper", "tamper")
+    add("--timeout", "timeout", float)
+    add("--time-sec", "time_sec", int)
+    add("--delay", "delay", float)
+    add("--retries", "retries", int)
+    add("--prefix", "prefix")
+    add("--suffix", "suffix")
+    add("--proxy", "proxy")
+    # detection tuning + request control + auth/CSRF (flags audited to exist)
+    _hdr = o.get("headers")
+    if _hdr not in (None, ""):   # textarea: one header per line -> literal \n
+        args.append("--headers={}".format(str(_hdr).replace("\r\n", "\n").replace("\n", "\\n")))
+    add("--ignore-code", "ignore_code")
+    add("--string", "test_string")
+    add("--not-string", "not_string")
+    add("--regexp", "regexp")
+    add("--code", "code", int)
+    add("--skip", "skip")
+    add("--auth-type", "auth_type")
+    add("--auth-cred", "auth_cred")
+    add("--csrf-token", "csrf_token")
+    add("--csrf-url", "csrf_url")
+    # danger zone (interactive shells --os-shell/--sql-shell intentionally NOT
+    # exposed: they'd block on stdin in a background subprocess)
+    add("--sql-query", "sql_query")
+    add("--os-cmd", "os_cmd")
+    add("--file-read", "file_read")
+    add("--file-write", "file_write")
+    add("--file-dest", "file_dest")
+
+    for key, flag in (("get_banner", "--banner"),
+                      ("get_current_user", "--current-user"),
+                      ("get_current_db", "--current-db"),
+                      ("get_hostname", "--hostname"),
+                      ("get_dbs", "--dbs"),
+                      ("is_dba", "--is-dba"),
+                      ("dump", "--dump"),
+                      ("dump_all", "--dump-all"),
+                      ("passwords", "--passwords")):
+        if o.get(key):
+            args.append(flag)
+
+    # per-scan output dir -> fully isolates sqlmap's per-target state
+    # (session.sqlite HashDB, target.txt, dump/), so concurrent scans -- even
+    # against the SAME host -- never share files. sqlmap nests
+    # <output-dir>/<hostname>/ beneath this; ctx.id is unique per scan.
+    args.append("--output-dir={}".format(
+        os.path.join(config.DATA_DIR, "sqlmap_output", str(ctx.id))))
+    return args
+
+
+def _pump(pipe, q):
+    try:
+        for line in iter(pipe.readline, ""):
+            q.put(line)
+    except Exception:
+        pass
+    finally:
+        q.put(None)  # sentinel: stream closed
 
 
 def run(ctx):
-    base_url = ctx.sqlmapapi_base
     ctx.append_log("=== sqlmap 掃描開始 ===")
     ctx.append_log("目標:{} {}".format(ctx.method, ctx.url))
     if ctx.restrict_ip:
-        ctx.append_log("限制測試來源 IP:{}".format(ctx.restrict_ip))
+        # audit/memo only -- neither sqlmap nor ghauri can bind an outbound
+        # source IP, so this is a note, not an enforced restriction.
+        ctx.append_log("備忘・允許測試來源 IP:{}".format(ctx.restrict_ip))
 
-    # 1) new task
+    args = build_args(ctx)
+    cmd = [ctx.python_exe, config.SQLMAP_LAUNCH] + args + ctx.extra_flag_list()
+    ctx.append_log("指令:{}".format(base.display_cmd(cmd)))
+
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+
     try:
-        resp = _req(base_url + "/task/new")
-        taskid = resp.get("taskid")
-        if not taskid:
-            raise RuntimeError("sqlmap API 未回傳 taskid:{}".format(resp))
-    except Exception as e:
-        ctx.append_log("!! 無法建立 sqlmap 任務(REST API 沒啟動?):{}".format(e))
-        ctx.fail("sqlmap API 連線失敗:{}".format(e))
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            bufsize=1,
+            env=env,
+            cwd=config.DATA_DIR,
+        )
+    except FileNotFoundError:
+        ctx.append_log("!! 找不到攜帶版 python 或 sqlmap,請先執行 bootstrap.bat")
+        ctx.fail("sqlmap 啟動失敗:找不到 python/sqlmap")
         return
-    ctx.engine_task_id = taskid
-    ctx.append_log("sqlmap task id = {}".format(taskid))
-
-    # 2) start scan with options
-    opts = build_options(ctx)
-    ctx.append_log("等效指令:{}".format(equivalent_cmdline(ctx, opts)))
-    ctx.append_log("(REST API 選項:{})".format(json.dumps(opts, ensure_ascii=False)))
-    try:
-        start = _req(base_url + "/scan/{}/start".format(taskid), payload=opts)
     except Exception as e:
-        ctx.append_log("!! 啟動掃描失敗:{}".format(e))
-        ctx.fail("啟動掃描失敗:{}".format(e))
-        return
-    # A failed start (bad option etc.) never enters 'running', so the poll loop
-    # below would spin forever waiting for 'terminated'. Treat it as fatal.
-    if not start.get("success", True) and "engineid" not in start:
-        ctx.append_log("!! 啟動掃描回應異常,任務未開始:{}".format(start))
-        try:
-            _req(base_url + "/task/{}/delete".format(taskid))
-        except Exception:
-            pass
-        ctx.fail("sqlmap 未能啟動掃描(選項可能無效):{}".format(start))
+        ctx.append_log("!! sqlmap 啟動失敗:{}".format(e))
+        ctx.fail("sqlmap 啟動失敗:{}".format(e))
         return
 
-    # 3) poll log + status
-    last = 0
+    ctx.engine_proc = proc
+    q = queue.Queue()
+    reader = threading.Thread(target=_pump, args=(proc.stdout, q), daemon=True)
+    reader.start()
+
     killed = False
-    seen_running = False
-    startup_failed = False
-    idle = 0
     while True:
         if ctx.should_stop():
             try:
-                _req(base_url + "/scan/{}/kill".format(taskid))
+                proc.terminate()
             except Exception:
                 pass
             ctx.append_log("== 使用者中止掃描 ==")
             killed = True
             break
         try:
-            log = _req(base_url + "/scan/{}/log".format(taskid))
-            entries = log.get("log", []) or []
-            for e in entries[last:]:
-                ctx.append_log("[{}] [{}] {}".format(
-                    e.get("time", ""), e.get("level", ""), e.get("message", "")))
-            last = len(entries)
-        except Exception as e:
-            ctx.append_log("(讀取 log 暫時失敗:{})".format(e))
-
-        try:
-            status = _req(base_url + "/scan/{}/status".format(taskid))
-        except Exception as e:
-            status = {"status": "running"}
-            ctx.append_log("(讀取狀態暫時失敗:{})".format(e))
-
-        st = status.get("status")
-        if st == "running":
-            seen_running = True
-            idle = 0
-        elif st == "terminated":
+            line = q.get(timeout=0.5)
+        except queue.Empty:
+            if proc.poll() is not None:
+                reader.join(timeout=2)   # let the reader enqueue the tail + sentinel
+                _drain(q, ctx)
+                break
+            continue
+        if line is None:  # stream closed
             break
-        elif st == "not running":
-            # finished after running -> done; never ran -> bail so we don't spin
-            if seen_running:
-                break
-            idle += 1
-            if idle >= 8:  # ~10s and it never entered 'running'
-                ctx.append_log("!! sqlmap 任務長時間未進入執行狀態,判定啟動失敗。")
-                startup_failed = True
-                break
-        time.sleep(1.2)
+        ctx.append_log(line.rstrip("\n"))
 
-    # 4) collect data + decide vulnerable
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    # Compute the verdict from the pre-annotation log, THEN append the 【判定】
+    # block (so quoting an English marker in the block can't re-flip this scan).
     log_text = ctx.read_log()
-    vulnerable = base.looks_vulnerable(log_text)
+    vuln_marker, vuln_line = base.vuln_evidence(log_text)
     findings = base.extract_findings(log_text)
-    try:
-        data = _req(base_url + "/scan/{}/data".format(taskid))
-        if data.get("data"):
-            findings["api_data"] = data.get("data")
-            # presence of injection data is a strong signal
-            for d in data.get("data", []):
-                if d.get("type") in (1,) and d.get("value"):
-                    vulnerable = True
-    except Exception:
-        pass
-
-    # 5) cleanup task
-    try:
-        _req(base_url + "/task/{}/delete".format(taskid))
-    except Exception:
-        pass
+    vulnerable, vuln_marker = base.merge_vuln(vuln_marker, findings)  # fold per-param confirmation in
+    waf_marker, _waf_line = base.waf_evidence(log_text)
 
     if killed:
-        ctx.finish(status="killed", vulnerable=vulnerable, findings=findings)
-    elif startup_failed:
-        # never ran -> mark error (not a green "done"), so history isn't poisoned
-        ctx.fail("sqlmap 任務未進入執行狀態,啟動失敗")
+        recorded = ctx.finish(status="killed", vulnerable=vulnerable, findings=findings)
+        base.append_verdict(ctx, tool="sqlmap", vulnerable=vulnerable,
+                            vuln_marker=vuln_marker, vuln_line=vuln_line,
+                            status="killed", returncode=None,
+                            fail_marker=None, fail_line=None, clean_hit=False,
+                            waf_marker=waf_marker, findings=findings,
+                            recorded_history=recorded)
     else:
-        ctx.append_log("=== sqlmap 掃描結束 ===")
-        ctx.finish(status="done", vulnerable=vulnerable, findings=findings)
+        rc = proc.returncode
+        ctx.append_log("=== sqlmap 掃描結束 (returncode={}) ===".format(rc))
+        # Count as a real "done" only if the target was actually reached & tested.
+        # rc!=0 (crash) OR a connection/access failure in the log (sqlmap exits 0
+        # even when it never connected) => "error", so finish() won't record the
+        # params as "tested, no vuln" and poison dedup. clean_hit (the positive
+        # "tested, nothing injectable" signal) overrides a stray failure substring
+        # left by a transient retry that recovered. A found vuln is preserved via
+        # the vulnerable flag regardless.
+        fail_marker, fail_line = base.fail_evidence(log_text)
+        clean_hit = base.looks_clean(log_text)
+        failed = (rc != 0) or (fail_marker is not None and not vulnerable and not clean_hit)
+        status = "error" if failed else "done"
+        recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
+        base.append_verdict(ctx, tool="sqlmap", vulnerable=vulnerable,
+                            vuln_marker=vuln_marker, vuln_line=vuln_line,
+                            status=status, returncode=rc,
+                            fail_marker=fail_marker, fail_line=fail_line,
+                            clean_hit=clean_hit, waf_marker=waf_marker,
+                            findings=findings, recorded_history=recorded)
+
+
+def _drain(q, ctx):
+    while True:
+        try:
+            line = q.get_nowait()
+        except queue.Empty:
+            return
+        if line is None:
+            return
+        ctx.append_log(line.rstrip("\n"))

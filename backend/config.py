@@ -60,13 +60,14 @@ def resolve_tool_dir(canonical_name, marker_parts):
     return canonical            # not present yet; keep canonical for messages
 
 
-# sqlmap: run from source (has its own REST API). No third-party deps.
+# sqlmap: run from vendored source as a direct CLI subprocess. No third-party deps.
 SQLMAP_DIR = resolve_tool_dir("sqlmap", ["sqlmapapi.py"])
 SQLMAP_PY = os.path.join(SQLMAP_DIR, "sqlmap.py")
 SQLMAPAPI_PY = os.path.join(SQLMAP_DIR, "sqlmapapi.py")
 # launcher that puts SQLMAP_DIR on sys.path first (embeddable python's ._pth
-# won't, so sqlmapapi.py can't `import lib` when run directly)
-SQLMAPAPI_LAUNCH = os.path.join(BACKEND_DIR, "sqlmapapi_launch.py")
+# won't, so sqlmap.py can't `import lib` when run directly). We run the CLI
+# (sqlmap.py) directly, one subprocess per scan (no REST API).
+SQLMAP_LAUNCH = os.path.join(BACKEND_DIR, "sqlmap_launch.py")
 
 # ghauri: GitHub SOURCE run directly (NOT pip-installed); only its dependency
 # libraries are pip-installed. Launched via backend/ghauri_launch.py.
@@ -85,12 +86,11 @@ SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 DEFAULTS = {
     "host": "127.0.0.1",
     "port": 8776,             # web UI port
-    "sqlmapapi_host": "127.0.0.1",
-    "sqlmapapi_port": 8775,   # sqlmap REST API port (internal)
-    "max_concurrent": 8,      # how many scans may run at once
+    "max_concurrent": 3,      # how many scans may run at once (pool size; needs restart)
     "public_ip_lookup": True, # try to also show the public IP (best-effort)
     "public_ip_timeout": 2.5, # seconds; failure is non-fatal
-    "ip_refresh_seconds": 60, # how often the UI auto-refreshes the IP display
+    "ip_refresh_seconds": 60,  # how often the UI auto-refreshes the IP display
+    "scan_refresh_seconds": 2, # how often the board/tree/log poll for updates
     "auto_open_browser": True,
     "default_tool": "sqlmap", # which tool the composer pre-selects (sqlmap | ghauri)
 }

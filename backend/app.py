@@ -229,6 +229,7 @@ def create_scans(payload: dict = Body(...)):
     params = payload.get("params", []) or []
     extra_flags = payload.get("extra_flags", "") or ""
     restrict_ip = payload.get("restrict_ip", "") or ""
+    note = payload.get("note", "") or ""
 
     tools = payload.get("tools")
     if not tools:
@@ -259,7 +260,7 @@ def create_scans(payload: dict = Body(...)):
     for tool in tools:
         row = manager.create_scan(parsed, tool, options, params,
                                   project_id=project_id, extra_flags=extra_flags,
-                                  restrict_ip=restrict_ip)
+                                  restrict_ip=restrict_ip, note=note)
         manager.launch(row)
         launched.append(row)
     return {"launched": launched, "count": len(launched)}
@@ -282,6 +283,21 @@ def get_scan(sid: int):
         raise HTTPException(404, "找不到掃描")
     if row.get("result_json"):
         row["result"] = json.loads(row["result_json"])
+    # the raw request (from the -r file) so the UI can re-load this scan's exact
+    # request + settings back into the composer ("以此設定重新配置"). The raw
+    # request contains the TARGET's cookies / auth headers, so only expose it when
+    # the server is bound to loopback -- never hand captured credentials to a
+    # non-local client on a 0.0.0.0 bind.
+    host = str(manager.settings.get("host", "127.0.0.1")).lower()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        try:
+            with open(os.path.join(config.REQ_DIR, "req_{}.txt".format(sid)),
+                      "r", encoding="utf-8", errors="ignore") as f:
+                row["raw"] = f.read()
+        except Exception:
+            row["raw"] = ""
+    else:
+        row["raw"] = ""
     return row
 
 
@@ -301,6 +317,20 @@ def scan_related(sid: int):
     return manager.history_for(row["project_id"], row["signature"], row["sig_endpoint"])
 
 
+@app.get("/api/param-tests")
+def param_tests(project_id: int = None, sig_endpoint: str = "",
+                name: str = "", location: str = ""):
+    """Full per-scan test timeline for ONE parameter (for the drill-down)."""
+    return db.param_test_log(project_id, sig_endpoint, name, location)
+
+
+@app.get("/api/param-history")
+def param_history(project_id: int = None, sig_endpoint: str = ""):
+    """Aggregate latest per-parameter status for an endpoint. Lets the composer
+    refresh the 測過/無洞/有漏洞 badges live without re-pasting + re-parsing."""
+    return db.param_history(project_id, sig_endpoint)
+
+
 @app.post("/api/scans/{sid}/stop")
 def scan_stop(sid: int):
     ok = manager.stop_scan(sid)
@@ -318,6 +348,19 @@ def scan_delete(sid: int):
 # --------------------------------------------------------------------------
 # static frontend (mounted last so /api/* wins)
 # --------------------------------------------------------------------------
+@app.middleware("http")
+async def _revalidate_static(request, call_next):
+    """Force browsers to revalidate the frontend assets instead of serving them
+    from cache heuristically. StaticFiles already sends ETag/Last-Modified, so a
+    reload becomes a cheap 304 when unchanged and a fresh 200 right after an edit
+    -- no more manual Ctrl+F5 to pick up CSS/JS changes."""
+    resp = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith((".css", ".js", ".html")):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.get("/")
 def index():
     return FileResponse(os.path.join(WEB_DIR, "index.html"))
