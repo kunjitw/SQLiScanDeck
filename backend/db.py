@@ -44,6 +44,7 @@ def init_db():
                 note TEXT DEFAULT '',
                 restrict_ip TEXT DEFAULT '',
                 archived INTEGER DEFAULT 0,
+                tabs_json TEXT DEFAULT '',      -- composer tab set (drafts; detail tabs = scanId ref) so it survives a data/ move
                 created_at INTEGER NOT NULL
             );
 
@@ -141,6 +142,11 @@ def init_db():
         # migrate older DBs that predate the scans.note column
         try:
             conn.execute("ALTER TABLE scans ADD COLUMN note TEXT DEFAULT ''")
+        except Exception:
+            pass
+        # migrate older DBs that predate the projects.tabs_json column
+        try:
+            conn.execute("ALTER TABLE projects ADD COLUMN tabs_json TEXT DEFAULT ''")
         except Exception:
             pass
         conn.commit()
@@ -341,7 +347,7 @@ def get_project(pid):
 
 
 def update_project(pid, **fields):
-    allowed = {"name", "note", "restrict_ip", "archived"}
+    allowed = {"name", "note", "restrict_ip", "archived", "tabs_json"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
         return get_project(pid)

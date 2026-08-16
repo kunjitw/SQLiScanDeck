@@ -154,15 +154,32 @@ function resetComposeTabs() {
 // a single global key leaked one project's tabs into another. Switching projects saves
 // the old project's tabs and restores the new one's (see setProject).
 function tabsKey() { return "composeTabs:" + (state.projectId != null ? state.projectId : "none"); }
+function _tabsBlob() { return JSON.stringify({ tabs: state.tabs, activeTabId: state.activeTabId, seq: _tabSeq }); }
+// localStorage is the fast local cache (per-browser); the DB copy (in data/) is what lets the
+// tabs survive a move to another machine. Detail tabs are just a scanId ref, so nothing is
+// duplicated -- on restore they re-load their scan from the (moved) DB.
+let _tabsDbTimer = null;
+function _persistTabsToDb() {
+  const pid = state.projectId; if (pid == null) return;
+  const blob = _tabsBlob();
+  clearTimeout(_tabsDbTimer);
+  _tabsDbTimer = setTimeout(() => { api("/api/projects/" + pid + "/tabs", "POST", { tabs_json: blob }).catch(() => {}); }, 800);
+}
 function saveTabs() {
   try {
     snapshotComposeTab();
-    localStorage.setItem(tabsKey(), JSON.stringify({ tabs: state.tabs, activeTabId: state.activeTabId, seq: _tabSeq }));
+    localStorage.setItem(tabsKey(), _tabsBlob());
   } catch (e) {}
+  _persistTabsToDb();
 }
 function restoreTabs() {
   let data = null;
   try { data = JSON.parse(localStorage.getItem(tabsKey()) || "null"); } catch (e) {}
+  if (!(data && Array.isArray(data.tabs) && data.tabs.length)) {
+    // localStorage empty (e.g. this data/ folder was moved to a fresh machine) -> use the DB copy
+    const proj = (state.projects || []).find(p => p.id === state.projectId);
+    if (proj && proj.tabs_json) { try { data = JSON.parse(proj.tabs_json); } catch (e) {} }
+  }
   if (data && Array.isArray(data.tabs) && data.tabs.length) {
     state.tabs = data.tabs;
     state.tabs.forEach(t => { if (!t.kind) t.kind = "compose"; });
@@ -3139,7 +3156,17 @@ async function loadTemplates(applyLast) {
 // ===== init ===============================================================
 function init() {
   restoreTabs(); renderComposeTabs(); applyTab(_activeTab());
-  window.addEventListener("beforeunload", saveTabs);
+  window.addEventListener("beforeunload", () => {
+    saveTabs();   // localStorage (synchronous)
+    // flush the latest tabs to the DB even mid-debounce: sendBeacon survives page unload
+    const pid = state.projectId;
+    if (pid != null && navigator.sendBeacon) {
+      try {
+        const blob = new Blob([JSON.stringify({ tabs_json: _tabsBlob() })], { type: "application/json" });
+        navigator.sendBeacon("/api/projects/" + pid + "/tabs", blob);
+      } catch (e) {}
+    }
+  });
   $("#projectsBtn").onclick = () => showProjectsView(false);
   $("#openNewProjectBtn").onclick = openNewProject;
   $("#npCreate").onclick = createProjectEntry;

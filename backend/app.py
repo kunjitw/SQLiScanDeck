@@ -120,6 +120,17 @@ def patch_project(pid: int, payload: dict = Body(...)):
     return db.update_project(pid, **(payload or {}))
 
 
+@app.post("/api/projects/{pid}/tabs")
+def save_project_tabs(pid: int, payload: dict = Body(...)):
+    # persist the composer tab set into the DB (survives a data/ move); POST so the page can
+    # flush it via navigator.sendBeacon on unload. Fire-and-forget: never error the client.
+    try:
+        db.update_project(pid, tabs_json=str(payload.get("tabs_json") or ""))
+    except Exception:
+        pass
+    return {"ok": True}
+
+
 @app.delete("/api/projects/{pid}")
 def del_project(pid: int):
     db.delete_project(pid)
