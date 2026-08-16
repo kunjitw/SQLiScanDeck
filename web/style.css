@@ -618,6 +618,7 @@ table tr:last-child td { border-bottom: none; }
 .vd-waf .vd-value { color: var(--warn); }
 .log-verdict { color: var(--accent); font-weight: 600; }
 .log-hit { background: var(--warn-soft); color: var(--warn); border-radius: 0; padding: 0 2px; }
+.log-enum { background: var(--accent-soft); color: var(--accent); border-radius: 0; padding: 0 2px; }   /* parsed enumeration value (banner / user / db / ...) */
 /* ONE unified outcome chip (scan list, tree, param table) */
 .state-chip { display: inline-flex; align-items: center; justify-content: center; font-size: 0.68rem; font-weight: 700; padding: 0.14rem 0.5rem; border-radius: var(--radius-xs); border: 1px solid transparent; white-space: nowrap; flex-shrink: 0; min-width: 3.4rem; text-align: center; }
 .state-chip.st-vuln { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }

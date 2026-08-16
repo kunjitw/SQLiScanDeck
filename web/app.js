@@ -2184,11 +2184,25 @@ function _renderDetailLog() {
   if (_selectionInside(view)) return;
   const atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
   const lows = markers.map(m => m.toLowerCase()).filter(Boolean);
+  // also light up the raw lines that produced a PARSED enumeration value (banner /
+  // current user / db / hostname / is-DBA / databases) -- both tools print these the
+  // same way ("banner: 'X'", "current user is DBA: True", "available databases [N]").
+  const enumPats = [];
+  try {
+    const f = JSON.parse((scan && scan.result_json) || "{}") || {};
+    if (f.banner) enumPats.push("banner:");
+    if (f.current_user) enumPats.push("current user:");
+    if (f.current_db) enumPats.push("current database:", "current db:");
+    if (f.hostname) enumPats.push("hostname:");
+    if (f.is_dba != null) enumPats.push("current user is dba:");
+    if (f.databases_count != null) enumPats.push("available databases [");
+  } catch (e) { /* slim scan / no result_json -> nothing to add */ }
   view.innerHTML = text.split(/\r?\n/).map(line => {
     const e = esc(line);
     if (line.includes("【判定】")) return `<span class="log-verdict">${e}</span>`;
     const low = line.toLowerCase();
     if (lows.some(m => low.includes(m))) return `<mark class="log-hit">${e}</mark>`;
+    if (enumPats.length && enumPats.some(p => low.includes(p))) return `<mark class="log-enum">${e}</mark>`;
     return e;
   }).join("\n");
   if (atBottom) view.scrollTop = view.scrollHeight;
