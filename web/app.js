@@ -1077,8 +1077,20 @@ async function parseRequest() {
     $("#composeFooter").classList.toggle("hidden", !_hasTool);
     const _at = (state.tabs || []).find(x => x.id === state.activeTabId);
     if (_at) { _at.title = r.endpoint || (r.parsed && r.parsed.url) || "新分頁"; renderComposeTabs(); }
-    if (_hasTool) updateCmdPreview();   // refresh the command preview now that state.parsed is set
+    if (_hasTool) { _syncSchemeFromRaw(raw); updateCmdPreview(); }   // match the toggle to the pasted URL's scheme, then preview
   } catch (e) { toast("解析失敗:" + e.message, "err"); }
+}
+// If the pasted first line carries an explicit scheme (bare URL or absolute request line),
+// set the HTTPS/HTTP toggle to match it -- so it starts correct. The toggle stays clickable
+// (backend uses force_ssl authoritatively), so the user can still override the URL's scheme.
+function _syncSchemeFromRaw(raw) {
+  const first = (raw || "").split(/\r?\n/)[0] || "";
+  const m = first.match(/\b(https?):\/\//i);
+  if (!m) return;   // relative request -> leave the toggle as the user set it
+  const wantHttps = /^https$/i.test(m[1]);
+  const seg = $('#optGrid [data-optkey="force_ssl"], #commonPins [data-optkey="force_ssl"]');
+  if (!seg) return;
+  seg.querySelectorAll(".seg-mini").forEach(bt => bt.classList.toggle("active", (bt.dataset.on === "1") === wantHttps));
 }
 // Locate the just-parsed endpoint inside the right-hand tree: expand ancestors,
 // highlight it, and scroll it into view. If untested, a synthetic "current"

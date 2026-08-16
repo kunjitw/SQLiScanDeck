@@ -73,7 +73,7 @@ def parse_request(raw, force_ssl=False):
         # Bare-URL shortcut.
         first_line = raw.splitlines()[0].strip()
         if len(raw.splitlines()) == 1 and re.match(r"^https?://", first_line, re.I):
-            return _parse_bare_url(first_line, result)
+            return _parse_bare_url(first_line, result, force_ssl)
 
         head, body = _split_head_body(raw)
         lines = head.split("\n")
@@ -180,10 +180,13 @@ def parse_request(raw, force_ssl=False):
         return result
 
 
-def _parse_bare_url(url, result):
+def _parse_bare_url(url, result, force_ssl=False):
     parts = urlsplit(url)
     result["method"] = "GET"
-    result["scheme"] = parts.scheme.lower()
+    # host/path come from the URL, but the SCHEME follows the caller's force_ssl (the HTTPS/HTTP
+    # selector) so the toggle can override a pasted https:// -- the frontend syncs the toggle to
+    # the URL's scheme on parse, then the user can still flip it.
+    result["scheme"] = "https" if force_ssl else "http"
     result["host"] = parts.netloc
     result["path"] = parts.path or "/"
     result["url"] = url
