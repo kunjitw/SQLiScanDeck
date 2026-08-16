@@ -6,6 +6,15 @@
 /tools/
 
 # ─────────────────────────────────────────────────────────────────────────
+# Portable MariaDB test lab — binaries (~400MB unpacked) fetched by
+# testlab/setup_mysql_lab.bat, plus its generated data dir. NOT source; the
+# vuln app (testlab/vuln_mysql_server.py) + control script are tracked, the
+# server binaries and database files are not.
+# ─────────────────────────────────────────────────────────────────────────
+/testlab/mariadb/
+/testlab/mysql-data/
+
+# ─────────────────────────────────────────────────────────────────────────
 # Runtime state — created on first run. MUST NEVER be published: the SQLite
 # DB holds your real scan history, data/requests/ stores the raw HTTP requests
 # you tested (cookies, Authorization headers, session tokens), data/logs/ holds
