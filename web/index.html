@@ -47,7 +47,7 @@
       <div id="scanFilterChips" class="filter-chips"></div>
     </div>
     <div id="scanBoard" class="board"></div>
-    <div id="boardEmpty" class="empty">此專案尚無掃描紀錄。<br>右側貼一個請求開始吧。</div>
+    <div id="boardEmpty" class="empty">此專案尚無掃描紀錄。<br>到中間「1 · 貼上請求」貼上 HTTP 請求或 URL 即可開始。</div>
   </aside>
   <div class="resizer" id="resizerLeft" title="拖曳調整左側寬度"></div>
 
@@ -99,11 +99,13 @@
     <!-- 4 · 掃描模式 -->
     <section class="panel hidden" id="modeCard">
       <div class="section-head"><span class="bar"></span>4 · 掃描模式</div>
-      <div class="seg-group mode-seg">
-        <button type="button" class="seg-btn" data-mode="basic" id="modeBasicBtn">基本掃描</button>
-        <button type="button" class="seg-btn" data-mode="advanced" id="modeAdvBtn">進階掃描</button>
+      <div class="mode-row">
+        <div class="seg-group mode-seg">
+          <button type="button" class="seg-btn" data-mode="basic" id="modeBasicBtn">基本掃描</button>
+          <button type="button" class="seg-btn" data-mode="advanced" id="modeAdvBtn">進階掃描</button>
+        </div>
+        <span class="mode-hint" id="modeHint"></span>
       </div>
-      <p class="panel-note" id="modeHint"></p>
     </section>
 
     <!-- 5 · 選擇範本 (包含「不使用範本」) -->
@@ -118,10 +120,9 @@
 
     <!-- 6 · 掃描選項 (shared options; basic = template-driven read-only) -->
     <section class="panel hidden" id="optionsCard">
-      <div class="section-head"><span class="bar"></span>6 · 掃描選項</div>
+      <div class="section-head"><span class="bar"></span><span id="optionsTitle">6 · 掃描選項</span></div>
       <div id="toolOptions" class="hidden">
         <p class="basic-hint hidden" id="basicHint">基本模式:選一個範本即套用,下面只顯示「此範本有設定的項目」(唯讀)。要自由調整改選「進階掃描」。</p>
-        <div class="subhead" id="optToolLabel">選項</div>
         <div class="opts-grid" id="optGrid"></div>
         <div class="opts-toggles" id="optToggles"></div>
       </div>
@@ -302,6 +303,7 @@
         </div>
       </div>
     </div>
+    <div id="treeFilterChips" class="filter-chips"></div>
     <div id="treeBox" class="tree-box"></div>
     <div id="treeEmpty" class="empty small">尚無測試紀錄。</div>
   </aside>

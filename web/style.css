@@ -321,6 +321,9 @@ input.mini { width: 100%; padding: 0.28rem 0.45rem; font-size: 0.78rem; }
 /* mode toggle (基本 / 進階) */
 /* 選擇工具 + 掃描模式 share ONE segmented-control aesthetic */
 .mode-seg, .tool-seg { display: inline-flex; margin-bottom: 0.4rem; }
+.mode-row { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+.mode-row .mode-seg { margin-bottom: 0; }
+.mode-hint { font-size: 0.8rem; color: var(--fg-dim); }
 .mode-seg .seg-btn, .tool-seg .seg-btn { padding: 0.4rem 1.1rem; font-size: 0.78rem; }
 .tool-seg .seg-btn input { display: none; }   /* radio kept for JS/state; the label IS the button */
 .seg-btn.active, .tool-seg .seg-btn:has(input:checked) { background: var(--accent-soft); color: var(--accent); }
@@ -348,6 +351,10 @@ input.mini { width: 100%; padding: 0.28rem 0.45rem; font-size: 0.78rem; }
 /* recessed terminal WELL (not a card-in-a-card): --code-bg is ~16 L* below the --elevated bar,
    plus an inset top lip + accent gutter -> reads as sunken, unifying the bar */
 .compose-footer .cmd-preview { flex: 1; min-width: 0; margin: 0; max-height: 4.2rem; overflow: auto; font-size: 0.72rem; padding: 0.4rem 0.55rem; border: 0; border-left: 2px solid var(--accent); border-radius: 0; box-shadow: inset 0 1px 2px rgba(0,0,0,0.55); }
+/* command <-> option cross-highlight: clickable command tokens + a jump-flash on the field */
+.cmd-tok { cursor: pointer; border-radius: var(--radius-xs); padding: 0 1px; transition: background var(--dur-fast); }
+.cmd-tok:hover, .cmd-tok-hl { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); }
+.opt-flash { background: var(--accent-soft) !important; box-shadow: inset 0 0 0 1px var(--accent); border-radius: var(--radius-xs); }
 .cf-row { display: flex; align-items: center; gap: 0.6rem; }
 .cf-note { flex: 1; display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
 .cf-note .note-input { flex: 1; min-width: 0; }

@@ -961,6 +961,7 @@ async function parseRequest() {
     $("#composeFooter").classList.toggle("hidden", !_hasTool);
     const _at = (state.tabs || []).find(x => x.id === state.activeTabId);
     if (_at) { _at.title = r.endpoint || (r.parsed && r.parsed.url) || "新分頁"; renderComposeTabs(); }
+    if (_hasTool) updateCmdPreview();   // refresh the command preview now that state.parsed is set
   } catch (e) { toast("解析失敗:" + e.message, "err"); }
 }
 // Locate the just-parsed endpoint inside the right-hand tree: expand ancestors,
@@ -1176,6 +1177,7 @@ function selectTool(tool, opts) {
   opts = opts || {};
   const radio = $(`input[name="tool"][value="${tool}"]`); if (radio) radio.checked = true;
   renderOptions(tool, "#optGrid", "#optToggles", "#optToolLabel");
+  const _ot = $("#optionsTitle"); if (_ot) _ot.textContent = "6 · 掃描選項(" + tool + ")";   // tool name in the card title
   $("#toolOptions").classList.remove("hidden");
   const _composed = !!state.parsed;   // mode / template / options / footer only once a request is parsed
   $("#modeCard").classList.toggle("hidden", !_composed);
@@ -1201,8 +1203,8 @@ function setScanMode(mode) {
   const oc = $("#optionsCard"); if (oc) oc.classList.toggle("mode-basic", state.scanMode === "basic");
   const bh = $("#basicHint"); if (bh) bh.classList.toggle("hidden", state.scanMode !== "basic");
   const mh = $("#modeHint"); if (mh) mh.textContent = state.scanMode === "basic"
-    ? "基本:只挑範本;套用後唯讀顯示它動到的設定。"
-    : "進階:完整、可自由調整所有掃描選項。";
+    ? "無腦套用範本"
+    : "自由調整所有掃描選項";
   // 「不使用範本」is an advanced-only escape hatch: basic mode always needs a template
   const noneBtn = $("#templateChips .tpl-none");
   if (noneBtn) noneBtn.classList.toggle("hidden", state.scanMode === "basic");
@@ -1296,10 +1298,10 @@ function populateTemplateDropdown(tool) {
     }
     applyTemplateById(id);
   });
-  markActiveTplChip((prevId && list.some(t => t.id === prevId)) ? prevId : 0);
+  markActiveTplChip((prevId && list.some(t => t.id === prevId)) ? prevId : 0);   // also fills #tplHint with the active template's 備註
   const noneBtn = box.querySelector(".tpl-none");
   if (noneBtn) noneBtn.classList.toggle("hidden", state.scanMode === "basic");
-  $("#tplHint").textContent = list.length ? "點一下即套用(⚠ 高風險會再確認)" : "此工具尚無範本(可到範本設定建立)";
+  if (!list.length) $("#tplHint").textContent = "此工具尚無範本(可到範本設定建立)";
 }
 // 「不使用範本」: drop any applied template and start from the tool's default options
 function clearTemplate() {
@@ -1311,6 +1313,12 @@ function clearTemplate() {
 }
 function markActiveTplChip(id) {
   $$("#templateChips .tpl-chip").forEach(c => c.classList.toggle("active", Number(c.dataset.tpl) === id));
+  // show the active template's 備註 (desc) under the chips
+  const th = $("#tplHint");
+  if (th) {
+    if (id === 0) th.textContent = "不套用任何範本,使用工具預設值。";
+    else { const t = (state.templates || []).find(x => x.id === id); th.textContent = (t && t.data && t.data.desc) || ""; }
+  }
 }
 function applyTemplateById(id, silent) {
   const t = (state.templates || []).find(x => x.id === id);
@@ -1323,56 +1331,128 @@ function applyTemplateById(id, silent) {
 }
 
 // ===== command preview (what will actually run) ===========================
-// Best-effort mirror of the drivers: for sqlmap it's the CLI EQUIVALENT of the
-// REST API options; for ghauri it's the real CLI. Purely for the user to see.
-function buildCmdPreview() {
-  if (!state.parsed) return "";
-  const tool = selectedTool();
-  if (!tool) return "";
-  const o = gatherOptions("#optGrid", "#optToggles");
-  const names = state.params || [];
-  const sel = [...new Set(names.filter(p => p.selected).map(p => p.name))];
-  const desel = [...new Set(names.filter(p => !p.selected).map(p => p.name))].filter(n => !sel.includes(n));
-  const parts = [tool, "-r", "req.txt", "--batch"];
-  const val = (flag, key) => { if (o[key] !== undefined && o[key] !== "") parts.push(`${flag}=${o[key]}`); };
-  val("--level", "level");
-  if (tool === "sqlmap") val("--risk", "risk");
-  val("--technique", "technique"); val("--dbms", "dbms"); val("--threads", "threads");
-  if (tool === "sqlmap") val("--tamper", "tamper");
-  val("--timeout", "timeout"); val("--time-sec", "time_sec"); val("--delay", "delay");
-  val("--retries", "retries"); val("--prefix", "prefix"); val("--suffix", "suffix"); val("--proxy", "proxy");
-  if (o.headers) parts.push("--headers=" + String(o.headers).replace(/\r?\n/g, "\\n"));
-  val("--ignore-code", "ignore_code");
-  val("--string", "test_string"); val("--not-string", "not_string"); val("--code", "code");
-  if (tool === "sqlmap") { val("--regexp", "regexp"); val("--auth-type", "auth_type"); val("--auth-cred", "auth_cred"); val("--csrf-token", "csrf_token"); val("--csrf-url", "csrf_url"); }
-  if (o.text_only) parts.push("--text-only");
-  if (o.dump) parts.push("--dump");
-  if (tool === "sqlmap") { val("--sql-query", "sql_query"); val("--os-cmd", "os_cmd"); val("--file-read", "file_read"); val("--file-write", "file_write"); val("--file-dest", "file_dest"); if (o.dump_all) parts.push("--dump-all"); if (o.passwords) parts.push("--passwords"); }
-  if (sel.length && desel.length) parts.push("-p " + sel.join(","));
-  if (o.force_ssl && tool === "sqlmap") parts.push("--force-ssl");   // ghauri: --force-ssl only affects cert verification, not scheme -> not passed
-  if (o.random_agent) parts.push("--random-agent");
-  const enums = [["get_banner", "--banner"], ["get_current_user", "--current-user"],
-                 ["get_current_db", "--current-db"], ["get_hostname", "--hostname"], ["get_dbs", "--dbs"]];
-  if (tool === "sqlmap") enums.push(["is_dba", "--is-dba"]);
-  enums.forEach(([k, f]) => { if (o[k]) parts.push(f); });
-  const extra = (o.extra_flags || "").trim();
-  if (extra) parts.push(extra);
-  return parts.join(" ");
-}
-function updateCmdPreview() {
-  const el = $("#cmdPreview"); if (!el) return;
-  const cmd = buildCmdPreview();
-  el.textContent = cmd || "選擇工具後,這裡會顯示實際會跑的指令。";
-  const ri = $("#riskIndicator"); if (!ri) return;
-  const tool = selectedTool();
-  if (!tool) { ri.className = "risk-line hidden"; ri.textContent = ""; return; }
-  const r = assessRisk(tool, gatherOptions("#optGrid", "#optToggles"));
-  if (r.level === "safe") { ri.className = "risk-line risk-safe"; ri.textContent = "風險評估:安全"; }
-  else {
-    ri.className = "risk-line risk-" + r.level;
-    const p = r.level === "danger" ? "⚠⚠ 危險:" : r.level === "high" ? "⚠ 高風險:" : "⚠ 偏高:";
-    ri.textContent = p + r.reasons.join(";");
+// --- command <-> option cross-highlight ------------------------------------
+// map a CLI flag back to the 掃描選項 field it came from, so preview tokens can link
+// to the controls (hover option -> glow token; click token -> jump + flash option).
+const CMD_FLAG_KEY = {
+  "--level": "level", "--risk": "risk", "--technique": "technique", "--dbms": "dbms", "--threads": "threads",
+  "--tamper": "tamper", "--timeout": "timeout", "--time-sec": "time_sec", "--delay": "delay", "--retries": "retries",
+  "--prefix": "prefix", "--suffix": "suffix", "--proxy": "proxy", "--headers": "headers", "--ignore-code": "ignore_code",
+  "--string": "test_string", "--not-string": "not_string", "--regexp": "regexp", "--code": "code",
+  "--auth-type": "auth_type", "--auth-cred": "auth_cred", "--csrf-token": "csrf_token", "--csrf-url": "csrf_url",
+  "--force-ssl": "force_ssl", "--random-agent": "random_agent", "--text-only": "text_only",
+  "--banner": "get_banner", "--current-user": "get_current_user", "--current-db": "get_current_db",
+  "--hostname": "get_hostname", "--dbs": "get_dbs", "--is-dba": "is_dba", "--dump": "dump", "--dump-all": "dump_all",
+  "--passwords": "passwords", "--sql-query": "sql_query", "--os-cmd": "os_cmd", "--file-read": "file_read",
+  "--file-write": "file_write", "--file-dest": "file_dest",
+};
+// store_true flags carry no value token -> don't swallow the following token
+const CMD_BARE = new Set(["--force-ssl", "--random-agent", "--text-only", "--banner", "--current-user",
+  "--current-db", "--hostname", "--dbs", "--is-dba", "--dump", "--dump-all", "--passwords"]);
+function _tokenizeCmd(s) {   // split on spaces, respecting the double-quotes display_cmd emits
+  const toks = []; let cur = "", q = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (q) { if (ch === '"') q = false; else cur += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === " ") { if (cur !== "") { toks.push(cur); cur = ""; } }
+    else cur += ch;
   }
+  if (cur !== "") toks.push(cur);
+  return toks;
+}
+function _cmdHtml(cmd) {
+  const toks = _tokenizeCmd(cmd), out = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    const flag = t.startsWith("--") ? t.split("=")[0] : null;
+    const key = flag && CMD_FLAG_KEY[flag];
+    if (key) {
+      let text = t;
+      if (!t.includes("=") && !CMD_BARE.has(flag) && i + 1 < toks.length && !toks[i + 1].startsWith("-")) {
+        text = t + " " + toks[i + 1]; i++;   // ghauri space-form: group "--level 3"
+      }
+      out.push(`<span class="cmd-tok" data-optkey="${esc(key)}" title="點我跳到此設定">${esc(text)}</span>`);
+    } else {
+      out.push(esc(t));
+    }
+  }
+  return out.join(" ");
+}
+// scroll a 掃描選項 field into view + briefly highlight it (expand its zone if collapsed)
+function flashOption(key) {
+  const el = $(`#optGrid [data-optkey="${key}"], #optToggles [data-optkey="${key}"]`);
+  if (!el) return;
+  const sec = el.closest(".opt-sec");
+  if (sec && sec.classList.contains("collapsed")) { sec.classList.remove("collapsed"); const car = sec.querySelector(".caret"); if (car) car.textContent = "▾"; }
+  const row = el.closest(".opt-row") || el.closest(".check") || el;
+  row.scrollIntoView({ block: "center" });
+  row.classList.add("opt-flash");
+  clearTimeout(row._flashT); row._flashT = setTimeout(() => row.classList.remove("opt-flash"), 1300);
+}
+// one-time delegated wiring (survives innerHTML re-renders of the tokens/options)
+function _wireCmdOptionLink() {
+  const cp = $("#cmdPreview");
+  if (cp && !cp._linked) {
+    cp._linked = true;
+    cp.addEventListener("click", e => { const tk = e.target.closest(".cmd-tok"); if (tk) flashOption(tk.dataset.optkey); });
+  }
+  const grid = $("#optGrid");
+  if (grid && !grid._linked) {
+    grid._linked = true;
+    let _hlKey = null;   // hovering any part of an option row glows its command token(s)
+    const setHl = (key) => {
+      if (key === _hlKey) return;
+      if (_hlKey) $$(`#cmdPreview .cmd-tok[data-optkey="${_hlKey}"]`).forEach(t => t.classList.remove("cmd-tok-hl"));
+      _hlKey = key;
+      if (key) $$(`#cmdPreview .cmd-tok[data-optkey="${key}"]`).forEach(t => t.classList.add("cmd-tok-hl"));
+    };
+    grid.addEventListener("mouseover", e => { const row = e.target.closest(".opt-row, .check"); const el = row && row.querySelector("[data-optkey]"); setHl(el ? el.dataset.optkey : null); });
+    grid.addEventListener("mouseleave", () => setHl(null));
+  }
+}
+// SINGLE SOURCE OF TRUTH: the backend builds the command with the SAME build_args()
+// the launcher runs (POST /api/preview), so the preview can't drift from the real
+// command the way a JS reimplementation would.
+async function _fetchPreviewCmd(tool, opts) {
+  try {
+    const r = await api("/api/preview", "POST", {
+      raw: ($("#rawInput").value || "").trim(), tool, options: opts,
+      params: state.params || [], extra_flags: opts.extra_flags || "", force_ssl: !!opts.force_ssl,
+    });
+    return (r && r.ok) ? r.cmd : ("(" + ((r && r.warning) || "無法產生指令") + ")");
+  } catch (e) { return "(預覽產生失敗:" + ((e && e.message) || e) + ")"; }
+}
+let _cmdPreviewTimer = null, _cmdPreviewSeq = 0;
+function updateCmdPreview() {
+  const el = $("#cmdPreview");
+  const tool = selectedTool();
+  const opts = tool ? gatherOptions("#optGrid", "#optToggles") : {};
+  // risk line stays LOCAL + instant; only the command string comes from the backend
+  const ri = $("#riskIndicator");
+  if (ri) {
+    if (!tool) { ri.className = "risk-line hidden"; ri.textContent = ""; }
+    else {
+      const r = assessRisk(tool, opts);
+      if (r.level === "safe") { ri.className = "risk-line risk-safe"; ri.textContent = "風險評估:安全"; }
+      else {
+        ri.className = "risk-line risk-" + r.level;
+        const p = r.level === "danger" ? "⚠⚠ 危險:" : r.level === "high" ? "⚠ 高風險:" : "⚠ 偏高:";
+        ri.textContent = p + r.reasons.join(";");
+      }
+    }
+  }
+  if (!el) return;
+  if (!tool || !state.parsed) { el.textContent = "選擇工具後,這裡會顯示實際會跑的指令。"; return; }
+  // debounce rapid edits into ONE call; keep showing the last value until it returns
+  clearTimeout(_cmdPreviewTimer);
+  const seq = ++_cmdPreviewSeq;
+  _cmdPreviewTimer = setTimeout(async () => {
+    const cmd = await _fetchPreviewCmd(tool, opts);
+    if (seq !== _cmdPreviewSeq) return;   // ignore a superseded response
+    if (cmd && cmd[0] !== "(") el.innerHTML = _cmdHtml(cmd);   // real command -> clickable, linkable tokens
+    else el.textContent = cmd;                                 // error/placeholder -> plain text
+  }, 160);
 }
 
 // ===== launch =============================================================
@@ -1432,11 +1512,12 @@ async function launch() {
     : risk.level === "high" ? "⚠ 高風險設定" : "⚠ 偏高設定";
   const riskHtml = risk.level === "safe" ? "" :
     `<div class="risk-box risk-${risk.level}"><b>${riskHead}</b><ul>${risk.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul></div>`;
+  const previewCmd = await _fetchPreviewCmd(tool, opts);   // authoritative command (same build_args as the real run)
   const ok = await confirmModal({
     title: "確認開始掃描",
     message: `工具 <b>${esc(tool)}</b> · 勾選 <b>${selCount}</b> 個參數<br>
       <span class="mono-label">目標</span> ${esc(target)}
-      <div class="cmd-confirm">${esc(buildCmdPreview())}</div>${riskHtml}`,
+      <div class="cmd-confirm">${esc(previewCmd)}</div>${riskHtml}`,
     okText: risk.level === "danger" ? "我了解具破壞性,仍要執行"
       : risk.level === "high" ? "我了解風險,仍要開始" : "開始掃描",
     cancelText: "再檢查一下",
@@ -1473,7 +1554,7 @@ const SCAN_FILTERS = [
   { key: "vuln", label: "有漏洞" },
   { key: "clean", label: "無洞" },
   { key: "running", label: "掃描中" },
-  { key: "other", label: "失敗" },
+  { key: "other", label: "失敗/中止" },   // 'other' = error/stopped(失敗) AND killed(已中止)
 ];
 function applyScanFilter(force) {
   const f = state.scanFilter || "";
@@ -1694,17 +1775,36 @@ function renderPathNode(host, rawNode, exp, cur, depth) {
 // never on settings/projects, so it can't be mistaken for a recorded scan.
 function _liveTarget() { return state.view === "dashboard" ? state.currentTarget : null; }
 function renderTreeIfChanged(force) {
+  renderTreeFilterChips();
   const lt = _liveTarget();
   const cur = lt ? lt.host + "|" + lt.path : "";
   const key = (state.allScans || []).map(s => s.id + ":" + s.status + ":" + s.vulnerable).join("|") +
-    "#" + Array.from(state.treeExpanded || []).join(",") + "~" + Array.from(state.tempScanPath || []).join(",") + "@" + cur + "!" + (state.detailId || "") + "|P" + (_pendingCompose() ? 1 : 0);
+    "#" + Array.from(state.treeExpanded || []).join(",") + "~" + Array.from(state.tempScanPath || []).join(",") + "@" + cur + "!" + (state.detailId || "") + "|P" + (_pendingCompose() ? 1 : 0) + "|F" + (state.treeFilter || "");
   if (!force && key === state.treeKey) return;
   state.treeKey = key;
   renderTree();
 }
+// tree outcome filter -- same chips/counts as the queue side (全部/有漏洞/無洞/掃描中/失敗)
+function renderTreeFilterChips() {
+  const box = $("#treeFilterChips"); if (!box) return;
+  const all = state.allScans || [];
+  const counts = {};
+  all.forEach(s => { const k = scanOutcome(s).key; counts[k] = (counts[k] || 0) + 1; });
+  const active = state.treeFilter || "";
+  const sig = active + "|" + SCAN_FILTERS.map(f => (f.key === "" ? all.length : (counts[f.key] || 0))).join(",");
+  if (box._sig === sig) return;   // unchanged -> skip (no poll churn)
+  box._sig = sig;
+  box.innerHTML = SCAN_FILTERS.map(f => {
+    const n = f.key === "" ? all.length : (counts[f.key] || 0);
+    const dot = f.key ? `<span class="fc-dot st-${f.key}"></span>` : "";
+    return `<button class="filter-chip${active === f.key ? " active" : ""}" data-filter="${f.key}">${dot}${f.label}<span class="fc-count">${n}</span></button>`;
+  }).join("");
+  $$("[data-filter]", box).forEach(el => el.onclick = () => { state.treeFilter = el.dataset.filter; renderTreeIfChanged(true); });
+}
 function renderTree() {
   if (!state.treeExpanded) state.treeExpanded = loadTreeExpanded();
-  const box = $("#treeBox"); const scans = state.allScans || [];
+  const box = $("#treeBox");
+  const scans = (state.allScans || []).filter(s => !state.treeFilter || scanOutcome(s).key === state.treeFilter);   // tree outcome filter
   const cur = _liveTarget();
   // manual (persisted) expansions unioned with the transient single-scan reveal
   const exp = new Set([...(state.treeExpanded || []), ...(state.tempScanPath || [])]);
@@ -2581,7 +2681,10 @@ function init() {
   $$("[data-close]").forEach(b => b.onclick = closeModals);
   document.addEventListener("keydown", e => { if (e.key === "Escape") closeModals(); });
 
-  loadProjects().then(ok => { if (ok) { showDashboard(); loadScans(); loadTemplates(true); } })
+  _wireCmdOptionLink();   // command <-> option cross-highlight (delegated, one-time)
+  // land on the PROJECT PICKER on open (don't auto-enter a project); last project stays
+  // remembered so the picker's back button + header still work.
+  loadProjects().then(ok => { if (ok) { loadScans(); loadTemplates(true); showProjectsView(false); } })
     .catch(e => toast("載入失敗:" + (e && e.message || e) + " — 請確認後端已啟動,重新整理再試", "err"));
   // settings: IP interval + configurable scan-refresh interval
   api("/api/settings").then(s => { state.settings = s; setIpSeconds(s.ip_refresh_seconds); applyScanRefresh(); }).catch(() => {});

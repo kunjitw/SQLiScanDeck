@@ -7,6 +7,7 @@ It serves the web UI and the JSON API on http://127.0.0.1:8776 by default.
 import os
 import sys
 import json
+import shlex
 import threading
 import webbrowser
 
@@ -21,6 +22,7 @@ import request_parser  # noqa: E402
 import filters as filters_mod  # noqa: E402
 import ip_utils        # noqa: E402
 from scan_manager import manager  # noqa: E402
+from drivers import sqlmap_driver, ghauri_driver, base as drv_base  # noqa: E402
 
 from fastapi import FastAPI, Body, HTTPException  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
@@ -264,6 +266,56 @@ def create_scans(payload: dict = Body(...)):
         manager.launch(row)
         launched.append(row)
     return {"launched": launched, "count": len(launched)}
+
+
+class _PreviewCtx:
+    """Minimal ScanContext stand-in so a driver's build_args() can produce the EXACT
+    CLI args without creating/launching a scan -- the preview and the real run share
+    one source of truth (build_args), so the UI command can't drift from reality."""
+    def __init__(self, options, params, scheme, extra_flags):
+        self.options = options or {}
+        self.params = params or []
+        self.scheme = scheme
+        self.extra_flags = extra_flags or ""
+        self.id = "N"                  # real scans use their DB id in --output-dir
+        self.request_file = "req.txt"  # real run uses req_<id>.txt
+
+    def extra_flag_list(self):
+        try:
+            return shlex.split(self.extra_flags) if self.extra_flags else []
+        except Exception:
+            return (self.extra_flags or "").split()
+
+
+@app.post("/api/preview")
+def preview_cmd(payload: dict = Body(...)):
+    """Build the 'what will run' command via the SAME build_args() the launcher uses,
+    so the on-screen preview is guaranteed to match the real command. Creates nothing."""
+    tool = payload.get("tool", "sqlmap")
+    if tool not in ("sqlmap", "ghauri"):
+        return {"ok": False, "cmd": "", "warning": "請選擇工具 sqlmap 或 ghauri"}
+    raw = payload.get("raw", "")
+    force_ssl = bool(payload.get("force_ssl", False))
+    options = payload.get("options", {}) or {}
+    params = payload.get("params", []) or []
+    extra_flags = payload.get("extra_flags", "") or ""
+
+    parsed = request_parser.parse_request(raw, force_ssl=force_ssl)
+    if not parsed.get("ok"):
+        return {"ok": False, "cmd": "", "warning": "請求解析失敗:{}".format("; ".join(parsed.get("warnings", [])))}
+    # reconcile the client's checkbox selection onto the freshly-parsed params by
+    # (name, location) -- identical to create_scans so -p matches the real run.
+    sel_map = {(p.get("name"), p.get("location")): bool(p.get("selected")) for p in params}
+    rparams = [dict(p, selected=sel_map.get((p.get("name"), p.get("location")), False))
+               for p in parsed.get("params", [])]
+
+    ctx = _PreviewCtx(options, rparams, parsed.get("scheme", "http"), extra_flags)
+    driver = sqlmap_driver if tool == "sqlmap" else ghauri_driver
+    try:
+        args = driver.build_args(ctx) + ctx.extra_flag_list()
+    except Exception as e:
+        return {"ok": False, "cmd": "", "warning": "產生指令失敗:{}".format(e)}
+    return {"ok": True, "cmd": drv_base.display_cmd([tool] + args)}
 
 
 @app.post("/api/scans/stop_all")
