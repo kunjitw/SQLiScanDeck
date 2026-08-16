@@ -11,7 +11,7 @@ const state = {
   parsed: null, params: [],
   scans: [], allScans: [], templates: [], settings: {},
   boardKey: "",
-  treeExpanded: null, treeKey: "", currentTarget: null,
+  treeExpanded: null, treeKey: "", currentTarget: null, scanMode: "advanced",
   detailId: null, detailOffset: 0, detailCache: "",
   editingTplId: null,
   skipCollapsed: true,   // auto-skipped params start collapsed at the bottom
@@ -19,7 +19,327 @@ const state = {
   ruleScope: "global",   // filter-rules sub-tab: "global" | "project"
   tplTool: "sqlmap",     // template editor sub-tab: "sqlmap" | "ghauri"
   ipSeconds: 60, ipRemaining: 60,
+  tabs: [], activeTabId: null,   // multi-tab composer (each tab = one composition)
 };
+let _tabSeq = 1;
+
+// ===== multi-tab composer =================================================
+// Each tab holds an independent composition. state.parsed/state.params are the
+// LIVE (active) tab; we snapshot them into the tab record on switch/close.
+function _blankTab() {
+  return { id: _tabSeq++, kind: "compose", title: "新分頁", raw: "", parsed: null, params: [], tool: null, options: null, note: "" };
+}
+function _detailTab(scanId) {
+  const s = (state.allScans || state.scans || []).find(x => x.id === scanId);
+  return { id: _tabSeq++, kind: "detail", scanId, title: s ? ("#" + scanId + " " + (s.tool || "")) : ("#" + scanId) };
+}
+function _activeTab() { return (state.tabs || []).find(x => x.id === state.activeTabId); }
+function snapshotComposeTab() {
+  const t = _activeTab();
+  if (!t || t.kind !== "compose") return;   // detail tabs are read-only, nothing to snapshot
+  t.raw = ($("#rawInput") && $("#rawInput").value) || "";
+  t.parsed = state.parsed;
+  t.params = state.params;
+  const tool = selectedTool();
+  t.tool = tool || null;
+  t.options = tool ? gatherOptions("#optGrid", "#optToggles") : null;
+  t.scanMode = state.scanMode;
+  t.note = ($("#scanNote") && $("#scanNote").value) || "";
+  t.title = t.parsed ? (t.parsed.endpoint || (t.parsed.parsed && t.parsed.parsed.url) || "新分頁")
+    : (t.raw.trim() ? "未解析請求" : "新分頁");
+}
+// One-shot center-panel crossfade on a REAL tab/detail switch, keyed so the 2s poll
+// re-render of identical content can never replay it. Called only from applyTab.
+function animateCenterSwap(key) {
+  const compose = $("#composeArea"), detail = $("#detailArea");
+  if (!compose || !detail) return;
+  const el = detail.classList.contains("hidden") ? compose : detail;   // whichever we switched to
+  if (el.dataset.swapKey === key) return;                              // same target -> no re-trigger
+  el.dataset.swapKey = key;
+  el.classList.remove("swap-anim");
+  void el.offsetWidth;                                                 // reflow so the keyframes restart
+  el.classList.add("swap-anim");
+  el.addEventListener("animationend", function done() { el.classList.remove("swap-anim"); }, { once: true });
+}
+function applyTab(t) {
+  state.activeTabId = t.id;
+  if (t.kind === "detail") {                 // read-only scan view: swap composer -> detail
+    $("#composeArea").classList.add("hidden");
+    $("#detailArea").classList.remove("hidden");
+    loadDetailInto(t.scanId);
+    renderComposeTabs();
+    renderTreeIfChanged(true);
+    renderBoardIfChanged();     // drop the "待解析" placeholder (this is a detail tab)
+    animateCenterSwap("scan:" + t.scanId);
+    saveTabs();
+    return;
+  }
+  state.detailId = null;
+  $("#detailArea").classList.add("hidden");
+  $("#composeArea").classList.remove("hidden");
+  state.parsed = t.parsed || null;
+  state.params = t.params || [];
+  if ($("#rawInput")) $("#rawInput").value = t.raw || "";
+  if ($("#parseWarn")) $("#parseWarn").textContent = "";
+  if (t.parsed) {
+    renderParseSummary(t.parsed); renderParams(); locateInTree(t.parsed);
+    $("#resultCard").classList.remove("hidden");
+    $("#toolCard").classList.remove("hidden");
+  } else {
+    $("#resultCard").classList.add("hidden");
+    $("#toolCard").classList.add("hidden");
+    $("#modeCard").classList.add("hidden");
+    $("#templateCard").classList.add("hidden");
+    $("#optionsCard").classList.add("hidden");
+    $("#composeFooter").classList.add("hidden");
+  }
+  if (t.tool) {
+    selectTool(t.tool);                                   // renders options + shows mode/options/footer
+    applyOptions(t.options || {}, "#optGrid", "#optToggles");
+    setScanMode(t.scanMode);                              // per-tab mode (defaults to advanced)
+  } else {
+    $$('input[name="tool"]').forEach(r => r.checked = false);
+    $("#toolOptions").classList.add("hidden");
+    $("#modeCard").classList.add("hidden");
+    $("#templateCard").classList.add("hidden");
+    $("#optionsCard").classList.add("hidden");
+    $("#composeFooter").classList.add("hidden");
+  }
+  if ($("#scanNote")) $("#scanNote").value = t.note || "";
+  updateCmdPreview();
+  renderComposeTabs();
+  renderTreeIfChanged(true);
+  renderBoardIfChanged();           // show/hide the left "待解析" placeholder for this tab
+  if (!t.parsed) locatePending();   // unparsed compose tab -> flash the "待解析" placeholder
+  animateCenterSwap("compose:" + t.id);
+  saveTabs();
+}
+function composeTabNew() {
+  snapshotComposeTab();
+  const t = _blankTab();
+  state.tabs.push(t);
+  applyTab(t);
+}
+function composeTabSwitch(id) {
+  if (id === state.activeTabId) return;
+  snapshotComposeTab();
+  const t = state.tabs.find(x => x.id === id);
+  if (t) applyTab(t);
+}
+async function composeTabClose(id) {
+  if (state.tabs.length <= 1) return;
+  const t = state.tabs.find(x => x.id === id); if (!t) return;
+  if (t.pinned) { toast("此分頁已釘選,先取消釘選(📌)才能關閉", ""); return; }   // pinned = protected
+  const live = id === state.activeTabId;
+  // always confirm so a stray click on ✕ never loses a tab
+  const msg = t.kind === "detail" ? "關閉這個唯讀詳情分頁?"
+    : ((live ? ($("#rawInput").value.trim()) : (t.raw && t.raw.trim()))
+        ? "這個分頁有內容,關閉會<b>捨棄</b>它。確定?" : "關閉這個分頁?");
+  const ok = await confirmModal({ title: "關閉分頁", message: msg, okText: "關閉分頁", cancelText: "取消" });
+  if (!ok) return;
+  const idx = state.tabs.findIndex(x => x.id === id);
+  state.tabs.splice(idx, 1);
+  if (live) applyTab(state.tabs[Math.max(0, idx - 1)]);
+  else renderComposeTabs();
+}
+function resetComposeTabs() {
+  state.tabs = [_blankTab()];
+  applyTab(state.tabs[0]);
+}
+// persist the whole tab set so F5 / server restart keeps the workspace intact.
+// (compose tabs hold the raw request -> stored in this browser's localStorage only.)
+// compose tabs are scoped PER PROJECT (they hold that project's raw requests/cookies) --
+// a single global key leaked one project's tabs into another. Switching projects saves
+// the old project's tabs and restores the new one's (see setProject).
+function tabsKey() { return "composeTabs:" + (state.projectId != null ? state.projectId : "none"); }
+function saveTabs() {
+  try {
+    snapshotComposeTab();
+    localStorage.setItem(tabsKey(), JSON.stringify({ tabs: state.tabs, activeTabId: state.activeTabId, seq: _tabSeq }));
+  } catch (e) {}
+}
+function restoreTabs() {
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(tabsKey()) || "null"); } catch (e) {}
+  if (data && Array.isArray(data.tabs) && data.tabs.length) {
+    state.tabs = data.tabs;
+    state.tabs.forEach(t => { if (!t.kind) t.kind = "compose"; });
+    state.activeTabId = (data.activeTabId != null && state.tabs.some(t => t.id === data.activeTabId))
+      ? data.activeTabId : state.tabs[0].id;
+    _tabSeq = Math.max(data.seq || 0, ...state.tabs.map(t => t.id || 0)) + 1;
+  } else {
+    state.tabs = [_blankTab()];
+    state.activeTabId = state.tabs[0].id;
+  }
+}
+// drag-to-reorder compose tabs (insertion caret shows the exact drop gap)
+let _dragTabId = null;
+function _clearDrop(box) { $$(".ctab.drop-before, .ctab.drop-after", box).forEach(x => x.classList.remove("drop-before", "drop-after")); }
+function _reorderTab(fromId, toId, after) {
+  if (fromId == null || fromId === toId) return;
+  const from = state.tabs.findIndex(t => t.id === fromId);
+  if (from < 0 || state.tabs.findIndex(t => t.id === toId) < 0) return;
+  const [moved] = state.tabs.splice(from, 1);
+  const to = state.tabs.findIndex(t => t.id === toId);   // recompute index after removal
+  state.tabs.splice(after ? to + 1 : to, 0, moved);
+  renderComposeTabs(); saveTabs();
+}
+function renderComposeTabs() {
+  const box = $("#composeTabs"); if (!box) return;
+  box.innerHTML = (state.tabs || []).map(t =>
+    `<div class="ctab ${t.kind === "detail" ? "ctab-detail" : ""} ${t.id === state.activeTabId ? "active" : ""}" data-ctab="${t.id}" draggable="true" title="${esc(t.title || "新分頁")}">
+       <span class="ctab-title">${esc(t.title || "新分頁")}</span>
+       <button class="ctab-pin${t.pinned ? " pinned" : ""}" data-ctabpin="${t.id}" title="${t.pinned ? "已釘選 · 點擊取消釘選" : "釘選(避免被關閉)"}">📌</button>
+       <button class="ctab-close${(t.pinned || state.tabs.length <= 1) ? " off" : ""}" data-ctabclose="${t.id}" title="關閉分頁">✕</button>
+     </div>`).join("") +
+    `<button type="button" class="ctab-new" id="ctabNew" title="開新分頁">＋</button>`;
+  $$("[data-ctab]", box).forEach(el => {
+    el.onclick = (e) => {
+      if (e.target.closest("[data-ctabclose]")) return;
+      composeTabSwitch(Number(el.dataset.ctab));
+    };
+    el.onmousedown = (e) => { if (e.button === 1) e.preventDefault(); };            // no middle-click autoscroll
+    el.onauxclick = (e) => { if (e.button === 1) { e.preventDefault(); composeTabClose(Number(el.dataset.ctab)); } };   // middle-click = close
+    el.ondragstart = (e) => { _dragTabId = Number(el.dataset.ctab); try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(_dragTabId)); } catch (x) {} el.classList.add("dragging"); };
+    el.ondragend = () => { el.classList.remove("dragging"); _clearDrop(box); _dragTabId = null; };
+    el.ondragover = (e) => {
+      e.preventDefault(); try { e.dataTransfer.dropEffect = "move"; } catch (x) {}
+      _clearDrop(box);
+      if (_dragTabId == null || Number(el.dataset.ctab) === _dragTabId) return;
+      const r = el.getBoundingClientRect();
+      el.classList.add((e.clientX - r.left) > r.width / 2 ? "drop-after" : "drop-before");   // caret before/after by cursor
+    };
+    el.ondragleave = () => el.classList.remove("drop-before", "drop-after");
+    el.ondrop = (e) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      const after = (e.clientX - r.left) > r.width / 2;
+      _clearDrop(box);
+      _reorderTab(_dragTabId, Number(el.dataset.ctab), after);
+    };
+  });
+  $$("[data-ctabclose]", box).forEach(b => b.onclick = (e) => { e.stopPropagation(); composeTabClose(Number(b.dataset.ctabclose)); });
+  $$("[data-ctabpin]", box).forEach(b => b.onclick = (e) => { e.stopPropagation(); const t = state.tabs.find(x => x.id === Number(b.dataset.ctabpin)); if (t) { t.pinned = !t.pinned; renderComposeTabs(); saveTabs(); } });
+  const nb = $("#ctabNew"); if (nb) nb.onclick = () => composeTabNew();
+}
+// open (or focus) a READ-ONLY detail tab for a scan (replaces the old modal)
+function openScanDetail(scanId) {
+  snapshotComposeTab();   // always save current compose edits first (no-op on a detail tab)
+  let t = (state.tabs || []).find(x => x.kind === "detail" && x.scanId === scanId);
+  if (!t) { t = _detailTab(scanId); state.tabs.push(t); }
+  applyTab(t);
+}
+// load a scan's read-only detail into #detailArea + cross-highlight left & tree
+async function loadDetailInto(scanId) {
+  // restore THIS scan's cached log instead of blanking -> revisits paint instantly and a
+  // switch never shows an empty shell; the full fetch then hydrates IN PLACE (setHTML no-op).
+  state.detailId = scanId;
+  state.logs = state.logs || {};
+  const L = state.logs[scanId] || { cache: "", offset: 0 };
+  state.detailCache = L.cache; state.detailOffset = L.offset;
+  const cached = (state.allScans || []).find(x => x.id === scanId);
+  if (cached) renderScanDetail(cached);
+  _renderDetailLog();   // paint the restored log (or empty) -- never a "(載入中…)" blank
+  // loader shows ONLY if a cold log hasn't landed within 250ms (fast switches never flash it)
+  const _lt = setTimeout(() => { if (state.detailId === scanId && !state.detailCache) { const lv = $("#sdLog"); if (lv) lv.textContent = "載入中…"; } }, 250);
+  let s = null;
+  try { s = await api(`/api/scans/${scanId}`); } catch (e) {}
+  if (state.detailId !== scanId) { clearTimeout(_lt); return; }   // user switched mid-request -> abandon
+  if (s) renderScanDetail(s);
+  await pullDetailLog();
+  clearTimeout(_lt);
+  if (state.detailId !== scanId) return;
+  // transient reveal path to THIS scan; replacing it auto-collapses the previous
+  // click's reveal (no accumulation), while manual expansions stay untouched.
+  state.tempScanPath = _scanRevealKeys(s);
+  flashScan(scanId);             // state-derived flash -> survives poll re-renders
+  renderTreeIfChanged(true);     // templates now emit .flash-target on this scan's rows
+  renderBoardIfChanged(true);
+  highlightScan(scanId);         // smooth-scroll both panels so the row slides into view
+}
+// Cross-panel "reveal & highlight" (brushing-and-linking). Research-backed recipe:
+// smooth-scroll the row into view (so it visibly slides in) + an in-place outline/
+// glow pulse (Yellow-Fade shape, keeps the row's text legible) -- NOT a flying
+// marker (studies rate travelling arrows worst) + a persistent selected state
+// (.active/.detail-active). The transient flash is STATE-DERIVED (state.flashScanId
+// emitted by the row templates) so a poll re-render can't wipe it mid-pulse.
+function _scrollParent(el) {
+  let p = el && el.parentElement;
+  while (p) {
+    const oy = getComputedStyle(p).overflowY;
+    if ((oy === "auto" || oy === "scroll") && p.scrollHeight > p.clientHeight + 2) return p;
+    p = p.parentElement;
+  }
+  return null;
+}
+// eased scroll so the row slides into view (know up vs down). Duration adapts to
+// distance (220-360ms, ease-out); skipped only if already centred. Manual rAF tween
+// (not CSS scroll-behavior), so it animates even under prefers-reduced-motion -- the
+// locate cue is essential "where is it" feedback and is kept on deliberately.
+function _animScroll(el) {
+  if (!el) return;
+  const box = _scrollParent(el);
+  if (!box) { try { el.scrollIntoView({ block: "center" }); } catch (e) {} return; }
+  const cr = box.getBoundingClientRect(), er = el.getBoundingClientRect();
+  const want = box.scrollTop + (er.top - cr.top) - (box.clientHeight / 2) + (el.offsetHeight / 2);
+  const start = box.scrollTop;
+  const end = Math.max(0, Math.min(box.scrollHeight - box.clientHeight, want));
+  const dist = end - start;
+  if (Math.abs(dist) < 4) return;
+  const dur = Math.max(220, Math.min(360, 160 + Math.abs(dist) * 0.5));
+  const t0 = performance.now(), ease = t => 1 - Math.pow(1 - t, 3);
+  (function step(now) {
+    const t = Math.min(1, (now - t0) / dur);
+    box.scrollTop = start + dist * ease(t);
+    if (t < 1) requestAnimationFrame(step);
+  })(performance.now());
+}
+// direct pulse for a NON-scan-row element (synthetic node / ancestor node)
+function _pulse(el) {
+  if (!el) return;
+  el.classList.remove("flash-target"); void el.offsetWidth; el.classList.add("flash-target");
+  setTimeout(() => { try { el.classList.remove("flash-target"); } catch (e) {} }, 1600);
+}
+// state-derived transient flash for a scan row: the templates emit .flash-target
+// while s.id === state.flashScanId, so re-renders re-apply it; cleared after ~1.6s.
+function flashScan(scanId) {
+  state.flashScanId = scanId;
+  clearTimeout(state._flashTimer);
+  state._flashTimer = setTimeout(() => {
+    state.flashScanId = null;
+    renderBoardIfChanged(true); renderTreeIfChanged(true);
+  }, 1600);
+}
+function highlightScan(scanId) {
+  _animScroll(document.querySelector(`.scan-row[data-id="${scanId}"]`));   // left row (flash via state)
+  const trow = document.querySelector(`.tscan[data-scan="${scanId}"]`);
+  if (trow) { _animScroll(trow); return; }                                // tree row visible (flash via state)
+  // collapsed -> scroll + pulse the deepest visible ancestor node
+  const sc = (state.allScans || []).find(x => x.id === scanId);
+  if (!sc) return;
+  const { host, path } = _epParts({ endpoint: sc.endpoint, url: sc.url });
+  const target = "p:" + host + "|" + path;
+  let best = null, bestLen = -1;
+  document.querySelectorAll("#treeBox .trow[data-key]").forEach(el => {
+    const k = el.getAttribute("data-key");
+    const isAncestor = k === "h:" + host || (k.startsWith("p:" + host + "|") && (k === target || target.startsWith(k + "/")));
+    if (isAncestor && k.length > bestLen) { best = el; bestLen = k.length; }
+  });
+  _animScroll(best); _pulse(best);
+}
+// the keys needed to reveal a scan's record row (host + every path prefix so the
+// endpoint expands and its scans show). Returned as a TRANSIENT set.
+function _scanRevealKeys(s) {
+  const keys = new Set();
+  if (!s || typeof s !== "object") return keys;
+  try {
+    const { host, path } = _epParts({ endpoint: s.endpoint, url: s.url });
+    keys.add("h:" + host);
+    let acc = "";
+    for (const seg of String(path).split("/").filter(x => x !== "")) { acc += "/" + seg; keys.add("p:" + host + "|" + acc); }
+  } catch (e) {}
+  return keys;
+}
 
 // ===== option schemas (keys = backend driver option names) ================
 // Defaults + ranges verified against vendored source:
@@ -27,14 +347,27 @@ const state = {
 // `def` = the tool's own default (shown to the user; leaving a field blank uses it).
 // type "slider" renders a range + a synced manual number box.
 const COMMON_TOGGLES = [
-  { key: "force_ssl", label: "強制 HTTPS", desc: "把請求都當 https 送(--force-ssl)。" },
+  { key: "force_ssl", label: "強制 HTTPS", def: true,
+    desc: "預設開啟(多數站是 https)。sqlmap 會加 --force-ssl 強制走 https;打 http-only / localhost 時請取消。(ghauri 本來就預設 https,不受此影響)" },
   { key: "random_agent", label: "隨機 User-Agent", desc: "每次用隨機瀏覽器 UA,降低被指紋辨識/擋下。" },
+  { key: "text_only", label: "只比對文字", desc: "只比對回應的純文字、忽略 HTML 標籤;頁面雜訊多時較穩(--text-only)。" },
 ];
 const COMMON_FIELDS = [
   { key: "proxy", label: "Proxy", type: "text", placeholder: "http://127.0.0.1:8080",
-    desc: "把流量導到代理(常用來接 Burp 觀察 payload)。預設不使用。" },
-  { key: "restrict_ip", label: "限制來源 IP(備忘)", type: "text", placeholder: "留空=不限制",
-    desc: "僅作專案備忘用,記錄允許測試的來源 IP。" },
+    presets: [["http://127.0.0.1:8080", "Burp / ZAP / mitmproxy"], ["http://127.0.0.1:8888", "Fiddler / Charles"],
+      ["socks5://127.0.0.1:9050", "Tor 服務"], ["socks5://127.0.0.1:9150", "Tor Browser"]],
+    desc: "把流量導到代理(常用來接 Burp/ZAP 觀察 payload,或走 Tor)。點下方常用值或自訂。預設不使用。" },
+  { key: "headers", label: "額外標頭", type: "headers", wide: true,
+    desc: "自訂請求標頭:一組一組填(名稱 + 值),可新增/刪除(--headers)。" },
+  { key: "ignore_code", label: "忽略狀態碼", type: "text", placeholder: "401,403",
+    chips: ["401", "403", "404", "429", "500", "502", "503"],
+    desc: "忽略這些 HTTP 狀態碼(逗號分隔),避免固定錯誤碼中斷判定(--ignore-code)。點下方常用碼加入/移除,或自行輸入。" },
+  { key: "test_string", label: "True 標記字串", type: "text",
+    desc: "只有注入成功才會出現的字串;頁面內容動態、自動判定不穩時用它鎖定(--string)。" },
+  { key: "not_string", label: "False 標記字串", type: "text",
+    desc: "只有注入失敗才會出現的字串(--not-string)。" },
+  { key: "code", label: "True 狀態碼", type: "number",
+    desc: "把某個 HTTP 狀態碼當作 True 判定(--code),如 200。" },
   { key: "extra_flags", label: "額外參數(原樣傳給工具)", type: "text", wide: true, placeholder: "例:--prefix ) --suffix -- -",
     desc: "任何上面沒有的旗標,原封不動接到指令後面(進階)。" },
 ];
@@ -42,11 +375,12 @@ const SCHEMAS = {
   sqlmap: {
     fields: [
       { key: "level", label: "Level", type: "slider", min: 1, max: 5, def: 1,
-        desc: "測試深度:越高測越多注入點(含 Cookie、Header)與更多 payload,也越慢。" },
+        desc: "測試深度(1–5)。1=只測 GET/POST;2=加測 Cookie;3=加測 User-Agent/Referer 標頭;4=連平常略過的 CSRF/session 類參數也一起測(較易干擾應用狀態);5=加測 Host 標頭、payload 最多。越高越慢、噪音越大。" },
       { key: "risk", label: "Risk", type: "slider", min: 1, max: 3, def: 1,
-        desc: "風險:越高用越激進的 payload(可能 OR-based、影響資料),也越容易被 WAF 擋。" },
-      { key: "technique", label: "Technique", type: "text", def: "BEUSTQ", placeholder: "BEUSTQ",
-        desc: "用哪些技術:B 布林盲注 · E 報錯 · U 聯合查詢 · S 堆疊查詢 · T 時間盲注 · Q 內聯。留空=全用。" },
+        desc: "風險(1–3)。1=安全偵測 payload(無副作用);2=加重負載時間盲注(heavy-query/BENCHMARK,會讓 DB CPU 飆高,慢環境恐影響服務);3=加 OR-based(WHERE 條件對整表每一列成立,注入點若在 UPDATE/DELETE 可能改動多列資料)。日常授權測試用 1。" },
+      { key: "technique", label: "Technique(勾選)", type: "checks", join: "", def: "BEUSTQ",
+        options: [["B", "B 布林盲注"], ["E", "E 報錯"], ["U", "U 聯合查詢"], ["S", "S 堆疊查詢"], ["T", "T 時間盲注"], ["Q", "Q 內聯"]],
+        desc: "勾選要用的技術;全部不勾=用工具預設(全部)。" },
       { key: "threads", label: "Threads", type: "slider", min: 1, max: 10, def: 1,
         desc: "併發 HTTP 請求數:越高越快,但越容易觸發防護或造成漏判。sqlmap 上限 10。" },
       { key: "timeout", label: "Timeout", type: "slider", min: 5, max: 120, step: 5, def: 30,
@@ -57,14 +391,56 @@ const SCHEMAS = {
         desc: "每個請求之間的延遲秒數,用來避開速率限制。" },
       { key: "retries", label: "Retries", type: "slider", min: 0, max: 10, def: 3,
         desc: "連線逾時時的重試次數。" },
-      { key: "dbms", label: "DBMS", type: "text", placeholder: "mysql / mssql…",
-        desc: "強制指定後端資料庫,跳過自動偵測。預設自動偵測。" },
-      { key: "tamper", label: "Tamper", type: "text", placeholder: "space2comment,between",
-        desc: "繞過 WAF 的 payload 變形腳本(可多個,逗號分隔)。預設不使用。" },
+      { key: "dbms", label: "DBMS", type: "select",
+        options: [["", "自動偵測(建議)"], ["MySQL", "MySQL"], ["PostgreSQL", "PostgreSQL"],
+          ["Microsoft SQL Server", "Microsoft SQL Server"], ["Oracle", "Oracle"], ["SQLite", "SQLite"],
+          ["Microsoft Access", "Microsoft Access"], ["IBM DB2", "IBM DB2"], ["Firebird", "Firebird"],
+          ["MariaDB", "MariaDB"], ["SAP MaxDB", "SAP MaxDB"], ["Sybase", "Sybase"], ["HSQLDB", "HSQLDB"],
+          ["H2", "H2"], ["Informix", "Informix"]],
+        desc: "強制指定後端資料庫。手打不支援的值會讓 sqlmap 直接中止,故改用選單。預設自動偵測。" },
+      { key: "tamper", label: "Tamper(繞 WAF,可多選)", type: "checks", join: ",",
+        options: [
+          ["space2comment", "space2comment", "空白換 /**/。WAF 以空白為特徵過濾時首選(比 space2plus 穩)。通用"],
+          ["randomcase", "randomcase", "關鍵字大小寫隨機。WAF 用寫死大小寫的簽章時繞過;最泛用、低風險。通用"],
+          ["charencode", "charencode", "整段 URL 編碼。WAF 比對前沒先 decode 時有效(現代 WAF 多半無效)。通用"],
+          ["equaltolike", "equaltolike", "= 換成 LIKE。WAF 擋 = 時用(注意 % _ 會被當萬用字元)。通用"],
+          ["between", "between", "> 換 NOT BETWEEN、= 換 BETWEEN。WAF 擋 > 或 = 運算子時用。通用"],
+          ["greatest", "greatest", "> 換成 GREATEST()。WAF 擋 > 時用;⚠ 舊版 MSSQL 無此函式。"],
+          ["apostrophemask", "apostrophemask", "單引號換全形。WAF 只看 ASCII ' 、且後端會把全形折回 ASCII 時才有效。"],
+          ["base64encode", "base64encode", "整段 Base64。⚠ 僅『該參數應用會自行 base64-decode』時才有意義。"],
+          ["space2plus", "space2plus", "空白換 +。⚠ sqlmap 之後會把 + 再編成 %2B 反而讓查詢失效,少用。"],
+          ["percentage", "percentage", "每字元前加 %。⚠ 僅 ASP/IIS 平台有效,其他平台會破壞 payload。"],
+          ["versionedmorekeywords", "versionedmorekeywords", "關鍵字用 /*!…*/ 版本化註解包起。⚠ 僅 MySQL;WAF 靠關鍵字簽章時強力繞過。"],
+          ["modsecurityversioned", "modsecurityversioned", "整段用 /*!…*/ 版本化註解包起。⚠ 僅 MySQL;專打 ModSecurity。"],
+        ],
+        desc: "繞過 WAF 的 payload 變形腳本,可多選。⚠ 沒有『純利多』的 tamper——每個都是針對特定 WAF/DBMS 改寫 payload,對症才套;亂套可能讓 payload 失效或只對特定資料庫有效。上方大致由『通用/低風險』排到『窄/挑環境』。清單外的可用下方「額外參數」。" },
       { key: "prefix", label: "Prefix", type: "text",
-        desc: "在 payload 前面加固定字串(用於特殊 injection context)。" },
+        presets: [["'"], ["\""], ["')"], ["\")"], ["'))"], [")"]],
+        desc: "在 payload 前面加固定字串,用來跳出注入情境。點下方常用值或自訂。" },
       { key: "suffix", label: "Suffix", type: "text",
-        desc: "在 payload 後面加固定字串。" },
+        presets: [["-- -"], ["#"], ["-- "], ["/*"]],
+        desc: "在 payload 後面加固定字串,通常用來註解掉其餘查詢。點下方常用值或自訂。" },
+      { key: "regexp", label: "True 正則", type: "text",
+        desc: "用正則判定 True(--regexp),進階替代 True 標記字串。" },
+      { key: "auth_type", label: "HTTP 認證方式", type: "select",
+        options: [["", "無"], ["Basic", "Basic"], ["Digest", "Digest"], ["NTLM", "NTLM"]],
+        desc: "需 HTTP 認證的站台選這裡(--auth-type),搭配下方帳密。" },
+      { key: "auth_cred", label: "HTTP 認證帳密", type: "text", placeholder: "user:pass",
+        desc: "HTTP 認證帳密,格式 user:pass(--auth-cred)。" },
+      { key: "csrf_token", label: "CSRF token 參數名", type: "text",
+        desc: "有 anti-CSRF 的站:token 的參數名稱,sqlmap 每次自動帶最新值(--csrf-token)。" },
+      { key: "csrf_url", label: "CSRF token 來源 URL", type: "text",
+        desc: "抓 CSRF token 的來源頁(若與目標不同,--csrf-url)。" },
+      { key: "sql_query", label: "執行 SQL", type: "text", danger: true, placeholder: "SELECT ...",
+        desc: "⚠ 在目標上執行任意 SQL(--sql-query,可讀寫資料)。" },
+      { key: "os_cmd", label: "執行 OS 命令", type: "text", danger: true, placeholder: "whoami",
+        desc: "⚠ 透過注入在 DB 主機執行系統命令(--os-cmd,等同 RCE)。" },
+      { key: "file_read", label: "讀取伺服器檔案", type: "text", danger: true, placeholder: "/etc/passwd",
+        desc: "⚠ 讀取目標主機上的檔案(--file-read)。" },
+      { key: "file_write", label: "上傳本機檔案", type: "text", danger: true, placeholder: "本機檔案路徑",
+        desc: "⚠ 把本機檔案寫到目標(--file-write,常用於植入 webshell);需一併填「寫入目標路徑」。" },
+      { key: "file_dest", label: "寫入目標路徑", type: "text", danger: true, placeholder: "/var/www/html/x.php",
+        desc: "⚠ --file-write 的目標絕對路徑(--file-dest)。" },
     ],
     toggles: [
       { key: "get_banner", label: "取 banner", desc: "抓資料庫版本橫幅(--banner)。" },
@@ -73,14 +449,18 @@ const SCHEMAS = {
       { key: "get_hostname", label: "主機名", desc: "抓 DB 伺服器主機名。" },
       { key: "get_dbs", label: "列舉 DB", desc: "列出所有資料庫(較慢)。" },
       { key: "is_dba", label: "是否 DBA", desc: "檢查目前使用者是否為資料庫管理員。" },
+      { key: "dump", label: "匯出資料表", danger: true, desc: "⚠ 匯出資料表內容(--dump,會實際讀取並落地目標資料)。" },
+      { key: "dump_all", label: "匯出整個 DB", danger: true, desc: "⚠ 匯出所有資料庫全部內容(--dump-all),量大且高度侵入。" },
+      { key: "passwords", label: "抓密碼雜湊", danger: true, desc: "⚠ 匯出 DBMS 使用者密碼雜湊(--passwords)。" },
     ],
   },
   ghauri: {
     fields: [
       { key: "level", label: "Level", type: "slider", min: 1, max: 3, def: 1,
-        desc: "測試深度:越高測越多注入點與 payload,也越慢(ghauri 為 1–3)。" },
-      { key: "technique", label: "Technique", type: "text", def: "BEST", placeholder: "BEST",
-        desc: "用哪些技術:B 布林盲注 · E 報錯 · S 堆疊查詢 · T 時間盲注。留空=BEST(全用)。" },
+        desc: "測試深度(ghauri 1–3)。1=只測 GET/POST;2=加測 Cookie;3=加測 Header。越高越慢、噪音越大。" },
+      { key: "technique", label: "Technique(勾選)", type: "checks", join: "", def: "BEST",
+        options: [["B", "B 布林盲注"], ["E", "E 報錯"], ["S", "S 堆疊查詢"], ["T", "T 時間盲注"]],
+        desc: "勾選要用的技術(ghauri 無 U 聯合);全部不勾=用預設 BEST。" },
       { key: "threads", label: "Threads", type: "slider", min: 1, max: 10, def: 1,
         desc: "併發 HTTP 請求數:越高越快,但越容易觸發防護或漏判。" },
       { key: "timeout", label: "Timeout", type: "slider", min: 5, max: 120, step: 5, def: 30,
@@ -91,12 +471,16 @@ const SCHEMAS = {
         desc: "每個請求之間的延遲秒數,用來避開速率限制。" },
       { key: "retries", label: "Retries", type: "slider", min: 0, max: 10, def: 3,
         desc: "連線逾時時的重試次數。" },
-      { key: "dbms", label: "DBMS", type: "text", placeholder: "mysql / mssql…",
-        desc: "強制指定後端資料庫,跳過自動偵測。預設自動偵測。" },
+      { key: "dbms", label: "DBMS", type: "select",
+        options: [["", "自動偵測(建議)"], ["MySQL", "MySQL"], ["PostgreSQL", "PostgreSQL"],
+          ["Microsoft SQL Server", "Microsoft SQL Server"], ["Oracle", "Oracle"]],
+        desc: "強制指定後端資料庫。ghauri 支援 MySQL / PostgreSQL / MSSQL / Oracle。預設自動偵測。" },
       { key: "prefix", label: "Prefix", type: "text",
-        desc: "在 payload 前面加固定字串。" },
+        presets: [["'"], ["\""], ["')"], ["\")"], ["'))"], [")"]],
+        desc: "在 payload 前面加固定字串,用來跳出注入情境。點下方常用值或自訂。" },
       { key: "suffix", label: "Suffix", type: "text",
-        desc: "在 payload 後面加固定字串。" },
+        presets: [["-- -"], ["#"], ["-- "], ["/*"]],
+        desc: "在 payload 後面加固定字串,通常用來註解掉其餘查詢。點下方常用值或自訂。" },
     ],
     toggles: [
       { key: "get_banner", label: "取 banner", desc: "抓資料庫版本橫幅(--banner)。" },
@@ -104,6 +488,7 @@ const SCHEMAS = {
       { key: "get_current_db", label: "目前資料庫", desc: "抓目前使用的資料庫名。" },
       { key: "get_hostname", label: "主機名", desc: "抓 DB 伺服器主機名。" },
       { key: "get_dbs", label: "列舉 DB", desc: "列出所有資料庫(較慢)。" },
+      { key: "dump", label: "匯出資料表", danger: true, desc: "⚠ 匯出資料表內容(--dump,會實際讀取目標資料)。" },
     ],
   },
 };
@@ -117,7 +502,12 @@ async function api(path, method = "GET", body) {
   const ct = res.headers.get("content-type") || "";
   return ct.includes("json") ? res.json() : res.text();
 }
-function toast(msg, kind = "") { const t = $("#toast"); t.textContent = msg; t.className = "toast " + kind; setTimeout(() => t.classList.add("hidden"), 2800); }
+let _toastTimer = null;
+function toast(msg, kind = "") {
+  const t = $("#toast"); t.textContent = msg; t.className = "toast " + kind;
+  clearTimeout(_toastTimer);   // don't let a prior toast's timer hide this one early
+  _toastTimer = setTimeout(() => t.classList.add("hidden"), kind === "err" ? 6000 : 2800);
+}
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function fmtTime(ms) { return ms ? new Date(ms).toLocaleString() : ""; }
 function fmtDur(ms) { if (!ms && ms !== 0) return ""; const s = Math.round(ms / 1000); return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + (s % 60) + "s"; }
@@ -142,10 +532,59 @@ function renderFieldHtml(f) {
     const opts = f.options.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
     return `<div class="opt-row${wide}">${optHead(f)}<div class="opt-control"><select data-optkey="${f.key}">${opts}</select></div>${optDesc(f)}</div>`;
   }
-  const attrs = [f.min != null ? `min="${f.min}"` : "", f.max != null ? `max="${f.max}"` : "", f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ""].join(" ");
-  return `<div class="opt-row${wide}">${optHead(f)}<div class="opt-control"><input data-optkey="${f.key}" type="${f.type}" ${attrs}></div>${optDesc(f)}</div>`;
+  if (f.type === "checks") {
+    // checkbox group -> joined string (join="" for technique letters, "," for tamper).
+    // options are [value, label] or [value, label, description].
+    const join = f.join != null ? f.join : ",";
+    const defSet = new Set(f.def ? (join === "" ? f.def.split("") : f.def.split(join)) : []);
+    const hasDesc = f.options.some(o => o.length > 2);
+    const boxes = f.options.map(o => {
+      const v = o[0], l = o[1], desc = o[2] || "";
+      return `<label class="opt-check${desc ? " with-desc" : ""}" title="${esc(desc)}">`
+        + `<input type="checkbox" value="${esc(v)}"${defSet.has(v) ? " checked" : ""}>`
+        + `<span class="oc-name">${esc(l)}</span>`
+        + (desc ? `<span class="oc-desc">${esc(desc)}</span>` : "")
+        + `</label>`;
+    }).join("");
+    const defBtn = f.def ? `<button type="button" class="checks-default" title="回到預設(${esc(f.def)})">預設</button>` : "";
+    return `<div class="opt-row${wide}">${optHead(f)}<div class="opt-control opt-checks${hasDesc ? " opt-checks-desc" : ""}" data-optkey="${f.key}" data-join="${esc(join)}" data-def="${esc(f.def || "")}">${boxes}${defBtn}</div>${optDesc(f)}</div>`;
+  }
+  if (f.type === "textarea") {
+    return `<div class="opt-row${wide}">${optHead(f)}<div class="opt-control"><textarea data-optkey="${f.key}" class="opt-textarea" rows="${f.rows || 3}" spellcheck="false" placeholder="${esc(f.placeholder || "")}"></textarea></div>${optDesc(f)}</div>`;
+  }
+  if (f.type === "headers") {
+    // dynamic name/value rows (populated by wireHeaders/applyOptions). The rows
+    // serialize to "Name: Value\n..." in gatherOptions (the --headers format).
+    return `<div class="opt-row${wide}">${optHead(f)}<div class="opt-control opt-headers" data-optkey="${f.key}"><div class="hdr-rows"></div><button type="button" class="hdr-add">＋ 新增標頭</button></div>${optDesc(f)}</div>`;
+  }
+  // text/number: `presets: [[value,label],...]` renders visible click-to-fill
+  // chips below the input, while still allowing the user to type their own value.
+  const attrs = [f.min != null ? `min="${f.min}"` : "", f.max != null ? `max="${f.max}"` : "",
+    f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ""].join(" ");
+  const presetsHtml = f.presets ? `<div class="opt-presets">` + f.presets.map(p => {
+    const v = p[0], l = p[1] || p[0];
+    return `<button type="button" class="preset-chip" data-fill="${esc(v)}" title="${esc(v)}">${esc(l)}</button>`;
+  }).join("") + `<button type="button" class="preset-chip preset-clear" data-fill="" title="清空此欄位">✕ 清空</button></div>` : "";
+  // toggle chips (e.g. common status codes): click adds/removes the value in the CSV
+  const chipsHtml = f.chips ? `<div class="code-chips">` + f.chips.map(c =>
+    `<button type="button" class="code-chip" data-code="${esc(c)}">${esc(c)}</button>`).join("") + `</div>` : "";
+  return `<div class="opt-row${wide}">${optHead(f)}<div class="opt-control"><input data-optkey="${f.key}" type="${f.type}" ${attrs}></div>${presetsHtml}${chipsHtml}${optDesc(f)}</div>`;
 }
-function renderToggleHtml(t) { return `<label class="check" title="${esc(t.desc || "")}"><input type="checkbox" data-optkey="${t.key}"> ${esc(t.label)}</label>`; }
+// build one header name/value row (values set as properties to avoid escaping issues)
+function _hdrAppendRow(box, name, val) {
+  const row = document.createElement("div");
+  row.className = "hdr-row";
+  row.innerHTML = `<input class="hdr-name" placeholder="標頭名稱,如 X-Forwarded-For"><input class="hdr-val" placeholder="值"><button type="button" class="hdr-del" title="刪除此標頭">✕</button>`;
+  row.querySelector(".hdr-name").value = name || "";
+  row.querySelector(".hdr-val").value = val || "";
+  box.appendChild(row);
+}
+function renderToggleHtml(t) {
+  // `def:true` -> checked by default; data-defon marks it so gather/apply store the
+  // explicit boolean (so un-ticking a default-on toggle actually persists).
+  const defOn = t.def ? ' checked data-defon="1"' : "";
+  return `<label class="check"><input type="checkbox" data-optkey="${t.key}"${defOn}><span class="check-body"><span class="check-name">${esc(t.label)}</span>${t.desc ? `<span class="check-desc">${esc(t.desc)}</span>` : ""}</span></label>`;
+}
 // keep a range slider and its manual number box in sync (blank number = tool default)
 function wireSliders(gridSel) {
   $$(`${gridSel} .slider-control`).forEach(sc => {
@@ -157,20 +596,160 @@ function wireSliders(gridSel) {
     range.value = (num.value.trim() === "" ? def : num.value);   // initial sync
   });
 }
+// Progressive disclosure: 常用 (always visible) / 進階 (collapsed, functional
+// sub-headers) / 危險 (collapsed, red). Keys not listed fall through to 偵測調校
+// so nothing silently disappears. `dump*`/shell/file keys are `danger:true` in
+// the schema and are pulled into the 危險 zone regardless of this map.
+const OPT_GROUPS = [
+  ["common",  "",            ["level", "risk", "technique", "threads", "force_ssl", "random_agent"]],
+  ["detect",  "偵測調校",     ["dbms", "tamper", "time_sec", "prefix", "suffix", "test_string", "not_string", "code", "regexp", "text_only"]],
+  ["conn",    "連線 / 效能",  ["timeout", "delay", "retries", "proxy"]],
+  ["request", "請求控制",     ["headers", "ignore_code"]],
+  ["auth",    "認證 / CSRF",  ["auth_type", "auth_cred", "csrf_token", "csrf_url"]],
+  ["enum",    "列舉(確認可注入後再開)", ["get_banner", "get_current_user", "get_current_db", "get_hostname", "get_dbs", "is_dba"]],
+  ["extra",   "其他",         ["extra_flags"]],
+];
+function _optGroupKey(key) {
+  for (const [g, , keys] of OPT_GROUPS) if (keys.includes(key)) return g;
+  return "detect";
+}
+// render a mixed list of fields (have .type) + toggles (no .type); toggles sit
+// in a .opts-toggles flex row so they read as a group of checkboxes.
+function renderOptGroup(opts) {
+  const fields = opts.filter(o => o.type);
+  const toggles = opts.filter(o => !o.type);
+  return fields.map(renderFieldHtml).join("")
+    + (toggles.length ? `<div class="opts-toggles">${toggles.map(renderToggleHtml).join("")}</div>` : "");
+}
 function renderOptions(tool, gridSel, togglesSel, labelSel) {
   const schema = SCHEMAS[tool]; if (!schema) return;
-  const fields = schema.fields.concat(COMMON_FIELDS);
-  const toggles = COMMON_TOGGLES.concat(schema.toggles);
-  $(gridSel).innerHTML = fields.map(renderFieldHtml).join("");
-  $(togglesSel).innerHTML = toggles.map(renderToggleHtml).join("");
+  const all = schema.fields.concat(COMMON_FIELDS, COMMON_TOGGLES, schema.toggles);
+  const danger = all.filter(o => o.danger);
+  const byGroup = {};
+  all.filter(o => !o.danger).forEach(o => {
+    const g = _optGroupKey(o.key); (byGroup[g] = byGroup[g] || []).push(o);
+  });
+  // 常用 — collapsible, default EXPANDED
+  const commonHtml = `
+    <div class="opt-sec opt-sec-common common-zone">
+      <button type="button" class="opt-sec-head common-head"><span class="caret">▾</span>常用</button>
+      <div class="opt-sec-body common-body">${renderOptGroup(byGroup.common || [])}</div>
+    </div>`;
+  // 進階 — collapsed, functional sub-headers
+  const advBody = OPT_GROUPS.filter(([g]) => g !== "common").map(([g, label]) => {
+    const os = byGroup[g]; if (!os || !os.length) return "";
+    return `<div class="opt-subhead">${esc(label)}</div>${renderOptGroup(os)}`;
+  }).join("");
+  const advHtml = advBody ? `
+    <div class="opt-sec adv-zone collapsed">
+      <button type="button" class="opt-sec-head adv-head"><span class="caret">▸</span>進階選項<span class="sec-hint">偵測調校・連線・請求・認證・列舉</span></button>
+      <div class="opt-sec-body adv-body">${advBody}</div>
+    </div>` : "";
+  // 危險 — collapsed, red; still inside gridSel so gatherOptions/applyOptions pick it up
+  const dangerHtml = danger.length ? `
+    <div class="opt-sec danger-zone collapsed">
+      <button type="button" class="opt-sec-head danger-head"><span class="caret">▸</span>⚠ 危險區<span class="sec-hint">取 shell / 執行 SQL / 讀寫檔案 / 匯出資料 · 高破壞性</span></button>
+      <div class="opt-sec-body danger-body">${renderOptGroup(danger)}</div>
+    </div>` : "";
+  $(gridSel).innerHTML = commonHtml + advHtml + dangerHtml;
+  if (togglesSel && $(togglesSel)) $(togglesSel).innerHTML = "";   // everything lives in gridSel now
   wireSliders(gridSel);
+  wirePresets(gridSel);
+  wireChecksDefault(gridSel);
+  wireHeaders(gridSel);
+  wireCodeChips(gridSel);
+  $$(`${gridSel} .common-zone, ${gridSel} .adv-zone, ${gridSel} .danger-zone`).forEach(z => {
+    const head = z.querySelector(".common-head, .adv-head, .danger-head"); if (!head) return;
+    head.onclick = () => {
+      const c = z.classList.toggle("collapsed");
+      const car = z.querySelector(".caret"); if (car) car.textContent = c ? "▸" : "▾";
+    };
+  });
   if (labelSel && $(labelSel)) $(labelSel).textContent = tool + " 選項";
+}
+// click-to-fill preset chips (prefix/suffix/proxy) -> set the sibling input + fire
+// an input event so the command preview and risk assessment update live.
+function wirePresets(gridSel) {
+  $$(`${gridSel} .preset-chip`).forEach(b => b.onclick = () => {
+    const row = b.closest(".opt-row"); if (!row) return;
+    const input = row.querySelector("input[data-optkey]"); if (!input) return;
+    input.value = b.dataset.fill;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+// "預設" button on a checkbox-group (technique) -> re-check the tool default set.
+function wireChecksDefault(gridSel) {
+  $$(`${gridSel} .checks-default`).forEach(b => b.onclick = () => {
+    const c = b.closest(".opt-checks"); if (!c) return;
+    const join = c.dataset.join != null ? c.dataset.join : ",";
+    const def = c.dataset.def || "";
+    const set = new Set(join === "" ? def.split("") : def.split(join).map(s => s.trim()).filter(Boolean));
+    c.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = set.has(cb.value); });
+    c.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+// dynamic header rows: wire the add button + delegate delete clicks; keep >=1 row.
+function wireHeaders(gridSel) {
+  $$(`${gridSel} .opt-headers`).forEach(box => {
+    const rows = box.querySelector(".hdr-rows");
+    if (rows && !rows.children.length) _hdrAppendRow(rows, "", "");
+    const add = box.querySelector(".hdr-add");
+    if (add) add.onclick = () => { _hdrAppendRow(rows, "", ""); box.dispatchEvent(new Event("input", { bubbles: true })); };
+    box.addEventListener("click", e => {
+      const del = e.target.closest(".hdr-del"); if (!del) return;
+      const row = del.closest(".hdr-row"); if (!row) return;
+      row.remove();
+      if (!rows.children.length) _hdrAppendRow(rows, "", "");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  });
+}
+// status-code chips: click toggles the code in the sibling CSV input.
+function wireCodeChips(gridSel) {
+  $$(`${gridSel} .code-chips`).forEach(box => {
+    const row = box.closest(".opt-row"); const input = row && row.querySelector("input[data-optkey]"); if (!input) return;
+    box.querySelectorAll(".code-chip").forEach(ch => ch.onclick = () => {
+      const arr = input.value.split(",").map(s => s.trim()).filter(Boolean);
+      const i = arr.indexOf(ch.dataset.code);
+      if (i >= 0) arr.splice(i, 1); else arr.push(ch.dataset.code);
+      input.value = arr.join(",");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      _syncCodeChips(gridSel);
+    });
+    input.addEventListener("input", () => _syncCodeChips(gridSel));
+  });
+  _syncCodeChips(gridSel);
+}
+function _syncCodeChips(gridSel) {
+  $$(`${gridSel} .code-chips`).forEach(box => {
+    const row = box.closest(".opt-row"); const input = row && row.querySelector("input[data-optkey]"); if (!input) return;
+    const set = new Set(input.value.split(",").map(s => s.trim()).filter(Boolean));
+    box.querySelectorAll(".code-chip").forEach(ch => ch.classList.toggle("active", set.has(ch.dataset.code)));
+  });
 }
 function gatherOptions(gridSel, togglesSel) {
   const o = {};
   $$(`${gridSel} [data-optkey], ${togglesSel} [data-optkey]`).forEach(el => {
     const k = el.dataset.optkey;
-    if (el.type === "checkbox") { if (el.checked) o[k] = true; }
+    if (el.classList.contains("opt-checks")) {
+      const join = el.dataset.join != null ? el.dataset.join : ",";
+      const vals = Array.from(el.querySelectorAll('input[type=checkbox]'))
+        .filter(c => c.checked).map(c => c.value);
+      const joined = vals.join(join);
+      // symmetric with sliders: none checked OR exactly the tool default -> omit
+      // (so an untouched technique isn't sent and doesn't trip a risk warning).
+      if (joined && joined !== (el.dataset.def || "")) o[k] = joined;
+    } else if (el.classList.contains("opt-headers")) {
+      const rows = Array.from(el.querySelectorAll(".hdr-row")).map(r => {
+        const n = r.querySelector(".hdr-name").value.trim();
+        const v = r.querySelector(".hdr-val").value.trim();
+        return n ? (n + ": " + v) : "";
+      }).filter(Boolean);
+      if (rows.length) o[k] = rows.join("\n");   // "Name: Value\n..." -> driver turns \n into literal
+    } else if (el.type === "checkbox") {
+      if (el.dataset.defon === "1") o[k] = el.checked;   // default-on: store true/false explicitly
+      else if (el.checked) o[k] = true;
+    }
     else { const v = el.value.trim(); if (v !== "") o[k] = el.type === "number" ? Number(v) : v; }
   });
   return o;
@@ -179,10 +758,45 @@ function applyOptions(o, gridSel, togglesSel) {
   o = o || {};
   $$(`${gridSel} [data-optkey], ${togglesSel} [data-optkey]`).forEach(el => {
     const k = el.dataset.optkey;
-    if (el.type === "checkbox") el.checked = !!o[k];
+    if (el.classList.contains("opt-checks")) {
+      const join = el.dataset.join != null ? el.dataset.join : ",";
+      const src = (k in o && o[k] != null) ? String(o[k]) : (el.dataset.def || "");
+      const set = new Set(join === "" ? src.split("") : src.split(join).map(s => s.trim()).filter(Boolean));
+      el.querySelectorAll('input[type=checkbox]').forEach(c => { c.checked = set.has(c.value); });
+      return;
+    }
+    if (el.classList.contains("opt-headers")) {
+      const box = el.querySelector(".hdr-rows"); box.innerHTML = "";
+      const lines = String((k in o && o[k] != null) ? o[k] : "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      if (!lines.length) lines.push("");   // always show at least one empty row
+      lines.forEach(line => {
+        const i = line.indexOf(":");
+        _hdrAppendRow(box, i >= 0 ? line.slice(0, i).trim() : line, i >= 0 ? line.slice(i + 1).trim() : "");
+      });
+      return;
+    }
+    if (el.type === "checkbox") el.checked = (k in o) ? !!o[k] : (el.dataset.defon === "1");
     else el.value = (k in o && o[k] != null) ? o[k] : "";
   });
   wireSliders(gridSel);   // re-sync slider positions after applying values
+  _syncCodeChips(gridSel);   // reflect applied status-code values on the chips
+  _revealFilledZones(gridSel);   // never hide an applied 進階/危險 value behind a collapse
+}
+// expand any collapsed 進階/危險 section that ended up holding a non-default value,
+// so options loaded from a template / reconfigure are visible, not silently hidden.
+function _revealFilledZones(gridSel) {
+  $$(`${gridSel} .adv-zone, ${gridSel} .danger-zone`).forEach(z => {
+    const filled = Array.from(z.querySelectorAll("[data-optkey]")).some(el => {
+      if (el.classList.contains("opt-checks")) {
+        const join = el.dataset.join != null ? el.dataset.join : ",";
+        const vals = Array.from(el.querySelectorAll("input[type=checkbox]:checked")).map(c => c.value).join(join);
+        return vals && vals !== (el.dataset.def || "");
+      }
+      if (el.type === "checkbox") return el.checked;
+      return el.value != null && el.value.trim() !== "";
+    });
+    void filled;   // no auto-expand: 進階/危險 stay COLLAPSED by default (basic mode expands only the chosen template's zones -- see _applyModeToGrid)
+  });
 }
 
 // ===== IP / health ========================================================
@@ -208,11 +822,16 @@ function ipTick() {
   if (state.ipRemaining <= 0) { doIpRefresh(); return; }
   updateIpCountdown();
 }
+// the green "ready" light was removed (a running page already proves the server is
+// up). We keep the ONE genuinely useful signal: warn once if sqlmap isn't installed.
+let _sqlmapMissingWarned = false;
 async function refreshHealth() {
   try {
-    const h = await api("/api/health"); const dot = $("#healthDot");
-    dot.className = "health-dot " + (h.sqlmap_present ? "ok" : "off");
-    dot.title = h.sqlmap_present ? "sqlmap 引擎就緒" : "尚未安裝 sqlmap(請執行 bootstrap.bat)";
+    const h = await api("/api/health");
+    if (!h.sqlmap_present && !_sqlmapMissingWarned) {
+      _sqlmapMissingWarned = true;
+      toast("尚未安裝 sqlmap 引擎(請執行 bootstrap.bat)", "err");
+    }
   } catch (e) {}
 }
 
@@ -232,12 +851,12 @@ function updateCurrentProjectLabel() {
   if (el) el.textContent = p ? p.name : "—";
 }
 function setProject(pid) {
+  if (state.projectId != null && state.projectId !== pid) saveTabs();   // persist the project we're leaving
   state.projectId = pid;
-  state.treeExpanded = null; state.treeKey = "";   // reload tree expand-state per project
+  state.treeExpanded = null; state.treeKey = ""; state.currentTarget = null;   // reset per project
   updateCurrentProjectLabel();
   try { localStorage.setItem("projectId", String(pid)); } catch (e) {}
-  const p = state.projects.find(x => x.id === pid);
-  if (p && p.restrict_ip) { const el = $('#optGrid [data-optkey="restrict_ip"]'); if (el && !el.value) el.value = p.restrict_ip; }
+  restoreTabs(); renderComposeTabs(); applyTab(_activeTab());   // load THIS project's own tab set
 }
 function requireProject() { if (state.projectId == null) { toast("請先建立並選擇一個專案", "err"); showProjectsView(true); return false; } return true; }
 
@@ -255,19 +874,23 @@ function renderProjectsList() {
     return;
   }
   box.innerHTML = state.projects.map(p => `
-    <div class="project-card ${p.id === state.projectId ? "current" : ""}">
+    <div class="project-card" data-enter="${p.id}" role="button" tabindex="0" title="進入此專案">
       <div class="pc-main">
-        <div class="pc-top"><span class="pc-name">${esc(p.name)}</span>${p.id === state.projectId ? '<span class="badge tested">目前</span>' : ""}</div>
+        <div class="pc-top"><span class="pc-name">${esc(p.name)}</span><span class="pc-enter-hint">進入 →</span></div>
         <div class="pc-note">${esc(p.note || "—")}</div>
-        <div class="pc-meta"><span class="mono-val">${esc(p.restrict_ip || "無限制IP")}</span> · ${esc(fmtTime(p.created_at))}</div>
+        <div class="pc-meta">${esc(fmtTime(p.created_at))}</div>
       </div>
       <div class="pc-actions">
-        <button class="btn sm" data-enter="${p.id}">進入</button>
         <button class="btn ghost sm danger-btn" data-delp="${p.id}">刪除</button>
       </div>
     </div>`).join("");
-  $$("[data-enter]", box).forEach(b => b.onclick = () => { setProject(Number(b.dataset.enter)); showDashboard(); loadScans(); });
-  $$("[data-delp]", box).forEach(b => b.onclick = async () => {
+  const enterProject = (id) => { setProject(id); showDashboard(); loadScans(); };
+  $$("[data-enter]", box).forEach(el => {
+    el.onclick = () => enterProject(Number(el.dataset.enter));
+    el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); enterProject(Number(el.dataset.enter)); } };
+  });
+  $$("[data-delp]", box).forEach(b => b.onclick = async (e) => {
+    e.stopPropagation();   // don't let a delete click also enter the project
     const id = Number(b.dataset.delp);
     const proj = state.projects.find(x => x.id === id);
     const ok = await confirmModal({
@@ -276,14 +899,16 @@ function renderProjectsList() {
       okText: "刪除",
     });
     if (!ok) return;
-    await api(`/api/projects/${id}`, "DELETE");
-    if (state.projectId === id) { try { localStorage.removeItem("projectId"); } catch (e) {} state.projectId = null; }
-    await loadProjects(); renderProjectsList();
-    toast("已刪除", "ok");
+    try {
+      await api(`/api/projects/${id}`, "DELETE");
+      if (state.projectId === id) { try { localStorage.removeItem("projectId"); } catch (e) {} state.projectId = null; }
+      await loadProjects(); renderProjectsList();
+      toast("已刪除", "ok");
+    } catch (e) { toast("刪除失敗:" + e.message, "err"); }
   });
 }
 function openNewProject() {
-  $("#npName").value = ""; $("#npNote").value = ""; $("#npIp").value = "";
+  $("#npName").value = ""; $("#npNote").value = "";
   showModal("newProjectModal");
   setTimeout(() => { const el = $("#npName"); if (el) el.focus(); }, 50);
 }
@@ -291,8 +916,8 @@ async function createProjectEntry() {
   const name = $("#npName").value.trim();
   if (!name) { toast("請填專案名稱", "err"); return; }
   try {
-    const p = await api("/api/projects", "POST", { name, note: $("#npNote").value.trim(), restrict_ip: $("#npIp").value.trim() });
-    $("#npName").value = ""; $("#npNote").value = ""; $("#npIp").value = "";
+    const p = await api("/api/projects", "POST", { name, note: $("#npNote").value.trim() });
+    $("#npName").value = ""; $("#npNote").value = "";
     closeModals();
     await loadProjects(); setProject(p.id);
     showDashboard(); loadScans(); loadTemplates(true);
@@ -319,12 +944,23 @@ async function parseRequest() {
   try {
     const r = await api("/api/parse", "POST", { raw, project_id: state.projectId });
     state.parsed = r; state.params = r.parsed.params.map(p => ({ ...p }));
-    const warns = r.parsed.warnings || [];
+    const warns = (r.parsed.warnings || []).slice();
+    if (!r.parsed.host) warns.push("未解析到 Host — 可能解析錯誤");
+    const anomCount = state.params.filter(_paramAnomaly).length;
+    if (anomCount) warns.push(`${anomCount} 個參數的名稱/值異常,可能解析錯誤(見表格紅色 ⚠)`);
     $("#parseWarn").textContent = warns.length ? "⚠ " + warns.join("；") : "";
     renderParseSummary(r); renderParams();
     locateInTree(r);
+    renderBoardIfChanged();   // update the left "待掃描 · <endpoint>" placeholder now that we're parsed
     $("#resultCard").classList.remove("hidden");
-    $("#optionsCard").classList.remove("hidden");
+    $("#toolCard").classList.remove("hidden");
+    const _hasTool = !!selectedTool();   // reveal mode/template/options/footer if a tool is already picked
+    $("#modeCard").classList.toggle("hidden", !_hasTool);
+    $("#templateCard").classList.toggle("hidden", !_hasTool);
+    $("#optionsCard").classList.toggle("hidden", !_hasTool);
+    $("#composeFooter").classList.toggle("hidden", !_hasTool);
+    const _at = (state.tabs || []).find(x => x.id === state.activeTabId);
+    if (_at) { _at.title = r.endpoint || (r.parsed && r.parsed.url) || "新分頁"; renderComposeTabs(); }
   } catch (e) { toast("解析失敗:" + e.message, "err"); }
 }
 // Locate the just-parsed endpoint inside the right-hand tree: expand ancestors,
@@ -340,7 +976,33 @@ function locateInTree(r) {
   for (const seg of path.split("/").filter(x => x !== "")) { acc += "/" + seg; state.treeExpanded.add("p:" + host + "|" + acc); }
   saveTreeExpanded();
   renderTreeIfChanged(true);
-  setTimeout(() => { const el = document.querySelector(".cur-tag"); if (el) el.scrollIntoView({ behavior: "smooth", block: "center" }); }, 60);
+  // flash the synthetic "目前(尚未掃描)" node so it's obvious WHERE a scan would land
+  setTimeout(() => { const tag = document.querySelector(".cur-tag"); const row = tag ? tag.closest(".trow") : null; _animScroll(row); _pulse(row); }, 80);
+}
+// While the ACTIVE tab is an unparsed compose tab, a "待解析(此分頁)" placeholder is
+// pinned at the top of the tree so the not-yet-located scan has a visible home. Once
+// parsed, state.parsed is set and the real "目前" node takes over (see locateInTree).
+function _pendingCompose() {
+  const t = _activeTab();
+  return state.view === "dashboard" && !!t && t.kind === "compose" && !state.parsed;
+}
+// left-list placeholder: shows for the active compose tab BEFORE its scan runs -- "待解析"
+// while unparsed, then "待掃描 · <endpoint>" once parsed, so you always see where it lands.
+function _boardPending() {
+  if (state.view !== "dashboard") return null;
+  const t = _activeTab();
+  if (!t || t.kind !== "compose") return null;
+  if (state.parsed) {
+    const ep = state.parsed.endpoint || (state.parsed.parsed && state.parsed.parsed.url) || "此請求";
+    return { label: "待掃描 · " + ep, parsed: true };
+  }
+  return { label: "待解析(此分頁)", parsed: false };
+}
+function locatePending() {
+  setTimeout(() => {
+    const row = document.querySelector("#treeBox .trow.tpending");
+    if (row) { _animScroll(row); _pulse(row); }   // same sweep/glow as a real locate
+  }, 80);
 }
 function renderParseSummary(r) {
   const p = r.parsed;
@@ -350,26 +1012,47 @@ function renderParseSummary(r) {
     ["Cookie 數", Object.keys(p.cookies || {}).length], ["Body 長度", (p.body || "").length],
     ["端點簽名", r.endpoint],
   ];
-  $("#parseSummary").innerHTML = rows.map(([k, v]) => `<div class="kv"><b>${k}</b><span>${esc(v)}</span></div>`).join("") +
+  $("#parseSummary").innerHTML = rows.map(([k, v]) => {
+    const bad = (k === "Host" && !p.host);   // no Host parsed -> likely a parse error
+    return `<div class="kv"><b>${k}</b><span class="${bad ? "bad" : ""}">${esc(v)}</span></div>`;
+  }).join("") +
     `<div class="kv wide"><b>URL</b><span class="mono-val">${esc(p.url)}</span></div>` +
     `<div class="hint-line">送給工具的請求會用你貼上的<b>原始請求</b>(僅換行正規化),解析只用來挑參數與去重。</div>`;
 }
 function priorBadge(p) {
-  if (p.prior_vulnerable) return `<span class="badge vuln">曾有漏洞×${p.prior_test_count}</span>`;
-  if (p.prior_status === "clean") return `<span class="badge clean">測過無洞×${p.prior_test_count}</span>`;
-  if (p.prior_status === "tested") return `<span class="badge tested">測過×${p.prior_test_count}</span>`;
-  return `<span class="badge none">未測</span>`;
+  let cls, label;
+  if (p.prior_vulnerable) { cls = "vuln"; label = `曾有漏洞×${p.prior_test_count}`; }
+  else if (p.prior_status === "clean") { cls = "clean"; label = `測過無洞×${p.prior_test_count}`; }
+  else if (p.prior_status === "skipped") return `<span class="badge skip" title="解析到但未勾選,未實際測試">已略過</span>`;
+  else if (p.prior_status) { cls = "tested"; label = `測過×${p.prior_test_count}`; }
+  else return `<span class="badge none">未測</span>`;
+  // has history -> clickable, opens this parameter's full test timeline
+  return `<button type="button" class="badge ${cls} phist-btn" data-phname="${esc(p.name)}" data-phloc="${esc(p.location)}" title="查看此參數的所有測試紀錄">${label} ⤢</button>`;
+}
+// Heuristic: does this parsed parameter look mis-parsed? Returns a reason (shown
+// in red) or "". Conservative — allows legit JSON names (dots/brackets), only
+// flags separators/whitespace/newlines that a real param name never contains.
+function _paramAnomaly(p) {
+  const name = String(p.name == null ? "" : p.name);
+  const val = String(p.value == null ? "" : p.value);
+  if (!name.trim()) return "參數名稱空白 — 可能解析錯誤";
+  if (/\s/.test(name)) return "名稱含空白 — 可能沒切好";
+  if (/[&?#=]/.test(name)) return "名稱含 & ? # = 等分隔符 — 可能沒切好";
+  if (/[\r\n]/.test(name) || /[\r\n]/.test(val)) return "含換行 — 可能解析錯誤";
+  if (name.length > 96) return "名稱異常長 — 可能整段被當成一個參數";
+  return "";
 }
 // Row colour tracks the CHECKBOX (will-be-tested), NOT the auto-skip flag.
 // Auto-skip only sets the INITIAL checked state and moves the param into the
 // SEPARATE "已自動略過" region below the table.
 function paramRowHtml(i) {
   const p = state.params[i];
-  return `<tr class="prow ${p.selected ? "sel" : "unsel"}" data-row="${i}">
+  const anom = _paramAnomaly(p);
+  return `<tr class="prow ${p.selected ? "sel" : "unsel"}${anom ? " anomaly-row" : ""}" data-row="${i}">
     <td><input type="checkbox" data-idx="${i}" ${p.selected ? "checked" : ""}></td>
-    <td class="pname">${esc(p.name)}</td>
+    <td class="pname${anom ? " anomaly" : ""}">${esc(p.name)}${anom ? `<span class="anomaly-flag" title="${esc(anom)}">⚠</span>` : ""}</td>
     <td><span class="loc-chip">${esc(p.location)}</span></td>
-    <td class="val-cell" title="${esc(p.value)}">${esc(p.value)}</td>
+    <td class="val-cell${anom ? " anomaly" : ""}" title="${anom ? esc(anom) : esc(p.value)}">${esc(p.value)}</td>
     <td>${p.filtered ? `<span class="badge skip" title="${esc(p.filter_reason || "")}">自動略過</span>` : ""}</td>
     <td>${priorBadge(p)}</td>
   </tr>`;
@@ -382,6 +1065,45 @@ function wireParamRows(root) {
     if (tr) { tr.classList.toggle("sel", cb.checked); tr.classList.toggle("unsel", !cb.checked); }
     updateCmdPreview();
   });
+  // clickable history badge -> this parameter's full test timeline
+  $$('.phist-btn', root).forEach(b => b.onclick = (e) => {
+    e.preventDefault();
+    openParamHistory(b.dataset.phname, b.dataset.phloc);
+  });
+}
+// Drill-down: every recorded test of ONE parameter (newest first), each linking
+// back to the scan it came from.
+async function openParamHistory(name, location) {
+  const sigEp = state.parsed && state.parsed.sig_endpoint;
+  if (!sigEp) { toast("請先解析請求", "err"); return; }
+  const q = new URLSearchParams({
+    project_id: state.projectId, sig_endpoint: sigEp, name, location,
+  });
+  let rows;
+  try { rows = await api(`/api/param-tests?${q.toString()}`); }
+  catch (e) { toast("讀取紀錄失敗:" + e.message, "err"); return; }
+  $("#phTitle").textContent = `參數測試紀錄:${name}(${location})`;
+  const body = $("#phBody");
+  if (!rows.length) {
+    body.innerHTML = `<div class="ph-empty">這個參數還沒有任何測試紀錄。</div>`;
+  } else {
+    const vulnN = rows.filter(r => r.vulnerable).length;
+    body.innerHTML =
+      `<div class="ph-sum">共 <b>${rows.length}</b> 次測試,其中 <b class="${vulnN ? "vuln-txt" : ""}">${vulnN}</b> 次判定有漏洞</div>` +
+      `<table class="ph-table"><thead><tr><th>時間</th><th>工具</th><th>結果</th><th>來源掃描</th></tr></thead><tbody>` +
+      rows.map(r => `<tr>
+        <td class="mono-val nowrap">${esc(fmtTime(r.created_at))}</td>
+        <td>${esc(r.tool || "—")}</td>
+        <td><span class="badge ${r.vulnerable ? "vuln" : (r.status === "clean" ? "clean" : "tested")}">${r.vulnerable ? "有漏洞" : (r.status === "clean" ? "無洞" : esc(r.status))}</span></td>
+        <td><button class="link-btn" data-phscan="${r.scan_id}">#${r.scan_id}${r.scan_status ? " · " + esc(r.scan_status) : ""}</button></td>
+      </tr>`).join("") +
+      `</tbody></table>`;
+  }
+  $$("[data-phscan]", body).forEach(b => b.onclick = () => {
+    const id = parseInt(b.dataset.phscan, 10);
+    closeModals(); openScanDetail(id);   // jump to that scan's full log/detail
+  });
+  showModal("paramHistModal");
 }
 // A collapsible sub-region (Header params / auto-skipped) below the main table.
 // Toggling flips a class on the EXISTING node (so grid-rows can animate the
@@ -455,29 +1177,149 @@ function selectTool(tool, opts) {
   const radio = $(`input[name="tool"][value="${tool}"]`); if (radio) radio.checked = true;
   renderOptions(tool, "#optGrid", "#optToggles", "#optToolLabel");
   $("#toolOptions").classList.remove("hidden");
+  const _composed = !!state.parsed;   // mode / template / options / footer only once a request is parsed
+  $("#modeCard").classList.toggle("hidden", !_composed);
+  $("#templateCard").classList.toggle("hidden", !_composed);
+  $("#optionsCard").classList.toggle("hidden", !_composed);
+  $("#composeFooter").classList.toggle("hidden", !_composed);
   populateTemplateDropdown(tool);
   try { localStorage.setItem("lastTool", tool); } catch (e) {}
-  const p = state.projects.find(x => x.id === state.projectId);
-  if (p && p.restrict_ip) { const el = $('#optGrid [data-optkey="restrict_ip"]'); if (el && !el.value) el.value = p.restrict_ip; }
   if (opts.autoDefault) {
     const def = (state.templates || []).find(t => t.is_default && t.data && t.data.tool === tool);
-    if (def) { applyOptions(def.data.options || {}, "#optGrid", "#optToggles"); $("#templateSelect").value = String(def.id); }
+    if (def) applyTemplateById(def.id, true);   // silent: pre-select the default template's options
+    else markActiveTplChip(0);                  // no default -> start on 「不使用範本」
   }
+  setScanMode(state.scanMode);   // re-apply the mode filter to the freshly rendered grid
   updateCmdPreview();
 }
-function populateTemplateDropdown(tool) {
-  const list = (state.templates || []).filter(t => t.data && t.data.tool === tool);
-  $("#templateSelect").innerHTML = '<option value="">（不套用範本）</option>' +
-    list.map(t => `<option value="${t.id}">${esc(t.name)}${t.is_default ? " ★預設" : ""}</option>`).join("");
-  $("#tplHint").textContent = list.length ? "" : "此工具尚無範本(可到範本設定建立)";
+// basic / advanced scan mode. basic = pick a template only; the SHARED option grid is
+// filtered to just that template's settings and shown READ-ONLY. gatherOptions still
+// reads the DOM either way, so the launch payload is identical -- one component, no drift.
+function setScanMode(mode) {
+  state.scanMode = (mode === "basic") ? "basic" : "advanced";
+  $$("#modeCard .seg-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === state.scanMode));
+  const oc = $("#optionsCard"); if (oc) oc.classList.toggle("mode-basic", state.scanMode === "basic");
+  const bh = $("#basicHint"); if (bh) bh.classList.toggle("hidden", state.scanMode !== "basic");
+  const mh = $("#modeHint"); if (mh) mh.textContent = state.scanMode === "basic"
+    ? "基本:只挑範本;套用後唯讀顯示它動到的設定。"
+    : "進階:完整、可自由調整所有掃描選項。";
+  // 「不使用範本」is an advanced-only escape hatch: basic mode always needs a template
+  const noneBtn = $("#templateChips .tpl-none");
+  if (noneBtn) noneBtn.classList.toggle("hidden", state.scanMode === "basic");
+  if (state.scanMode === "basic" && !$("#templateChips .tpl-chip.active:not(.tpl-none)")) {
+    const list = _sortByTplOrder((state.templates || []).filter(t => t.data && t.data.tool === selectedTool()), selectedTool());
+    const def = list.find(t => t.is_default) || list[0];
+    if (def) applyTemplateById(def.id, true);   // auto-pick so basic never shows an empty grid
+  }
+  _applyModeToGrid();
+  updateCmdPreview();
 }
-function applySelectedTemplate() {
-  const id = Number($("#templateSelect").value);
+function _applyModeToGrid() {
+  const basic = state.scanMode === "basic";
+  const chip = $("#templateChips .tpl-chip.active");
+  const tpl = chip ? (state.templates || []).find(t => t.id === Number(chip.dataset.tpl)) : null;
+  const tplOpts = (tpl && tpl.data && tpl.data.options) || {};
+  // Which of the template's options are a MEANINGFUL change from the field's default
+  // -> those (and only those) are shown in basic mode. Consult the DOM per key so the
+  // rule matches what actually gets launched (gatherOptions): a default-ON toggle counts
+  // when turned OFF; a checks value counts only when != its tool default.
+  const keys = new Set();
+  Object.keys(tplOpts).forEach(k => {
+    const v = tplOpts[k];
+    const el = $(`#optGrid [data-optkey="${k}"], #optToggles [data-optkey="${k}"]`);
+    if (!el) return;
+    if (el.classList.contains("opt-checks")) {
+      if (v != null && String(v) !== "" && String(v) !== (el.dataset.def || "")) keys.add(k);
+    } else if (el.type === "checkbox" && el.dataset.defon === "1") {
+      if (v === false) keys.add(k);           // default-ON (force_ssl): meaningful only when OFF
+    } else if (el.type === "checkbox") {
+      if (v === true) keys.add(k);             // default-OFF toggle: meaningful when ON
+    } else if (v !== "" && v != null && v !== false) {
+      keys.add(k);
+    }
+  });
+  $$("#optGrid [data-optkey], #optToggles [data-optkey]").forEach(el => {
+    const row = el.closest(".opt-row") || el.closest(".check") || el;
+    if (row.classList) row.classList.toggle("basic-hidden", basic && !keys.has(el.dataset.optkey));
+    (row.querySelectorAll ? [...row.querySelectorAll("input,select,textarea,button")] : [el]).forEach(i => { i.disabled = basic; });
+  });
+  // hide the 進階 sub-headers (請求控制 / 認證·CSRF / 列舉 / 其他 ...) that end up with no
+  // visible field. They are FLAT siblings interleaved with the field rows, so walk forward
+  // from each sub-header to the next one and hide it if every field between is basic-hidden.
+  $$("#optGrid .opt-subhead").forEach(sh => {
+    let anyVisible = false;
+    for (let n = sh.nextElementSibling; n && !(n.classList && n.classList.contains("opt-subhead")); n = n.nextElementSibling) {
+      const fields = (n.matches && n.matches("[data-optkey]")) ? [n] : (n.querySelectorAll ? [...n.querySelectorAll("[data-optkey]")] : []);
+      if (fields.some(el => { const r = el.closest(".opt-row") || el.closest(".check") || el; return !(r.classList && r.classList.contains("basic-hidden")); })) { anyVisible = true; break; }
+    }
+    sh.classList.toggle("basic-hidden", basic && !anyVisible);
+  });
+  // hide whole group sections that end up with no visible field
+  $$("#optGrid .opt-sec").forEach(sec => {
+    const anyVisible = [...sec.querySelectorAll("[data-optkey]")].some(el => {
+      const r = el.closest(".opt-row") || el.closest(".check") || el;
+      return !(r.classList && r.classList.contains("basic-hidden"));
+    });
+    sec.classList.toggle("basic-hidden", basic && !anyVisible);
+    if (basic && anyVisible && sec.classList.contains("collapsed")) {   // expand zones that hold the template's fields
+      sec.classList.remove("collapsed");
+      const car = sec.querySelector(".caret"); if (car) car.textContent = "▾";
+    }
+  });
+}
+function populateTemplateDropdown(tool) {
+  // order synced with the template-settings drag order (per tool)
+  const list = _sortByTplOrder((state.templates || []).filter(t => t.data && t.data.tool === tool), tool);
+  const box = $("#templateChips");
+  // preserve the current selection across a rebuild (settings refresh must not reset it)
+  const prev = box.querySelector(".tpl-chip.active");
+  const prevId = prev ? Number(prev.dataset.tpl) : 0;   // 0 = 「不使用範本」
+  // "不使用範本" always first, then click-to-apply chips (no dropdown, no separate 套用 button)
+  const noneChip = `<button type="button" class="tpl-chip tpl-none" data-tpl="0" title="不套用任何範本,使用預設值自行調整">不使用範本</button>`;
+  box.innerHTML = noneChip + list.map(t => {
+    const d = (t.data && t.data.danger) || "normal";
+    const dl = d === "high" ? "高風險" : d === "safe" ? "安全" : "一般";
+    const desc = (t.data && t.data.desc) || "";
+    return `<button type="button" class="tpl-chip danger-${esc(d)}" data-tpl="${t.id}" data-danger="${esc(d)}" title="危險等級:${dl}${desc ? " — " + esc(desc) : ""}">${esc(t.name)}${t.is_default ? " ★" : ""}${d === "high" ? " ⚠" : ""}</button>`;
+  }).join("");
+  $$(".tpl-chip", box).forEach(b => b.onclick = async () => {
+    const id = Number(b.dataset.tpl);
+    if (id === 0) { clearTemplate(); return; }   // 「不使用範本」-> reset to defaults, no template
+    if (b.dataset.danger === "high") {   // high-risk template -> confirm before applying
+      const t = (state.templates || []).find(x => x.id === id);
+      const ok = await confirmModal({
+        title: "套用高風險範本",
+        message: `「<b>${esc(t ? t.name : "")}</b>」是<b>高風險</b>範本${t && t.data && t.data.desc ? ":" + esc(t.data.desc) : ""}。確定要套用它的設定嗎?`,
+        okText: "套用", cancelText: "取消", danger: true,
+      });
+      if (!ok) return;
+    }
+    applyTemplateById(id);
+  });
+  markActiveTplChip((prevId && list.some(t => t.id === prevId)) ? prevId : 0);
+  const noneBtn = box.querySelector(".tpl-none");
+  if (noneBtn) noneBtn.classList.toggle("hidden", state.scanMode === "basic");
+  $("#tplHint").textContent = list.length ? "點一下即套用(⚠ 高風險會再確認)" : "此工具尚無範本(可到範本設定建立)";
+}
+// 「不使用範本」: drop any applied template and start from the tool's default options
+function clearTemplate() {
+  const tool = selectedTool(); if (!tool) return;
+  renderOptions(tool, "#optGrid", "#optToggles", "#optToolLabel");
+  markActiveTplChip(0);
+  _applyModeToGrid();
+  updateCmdPreview();
+}
+function markActiveTplChip(id) {
+  $$("#templateChips .tpl-chip").forEach(c => c.classList.toggle("active", Number(c.dataset.tpl) === id));
+}
+function applyTemplateById(id, silent) {
   const t = (state.templates || []).find(x => x.id === id);
   if (!t) return;
   applyOptions(t.data.options || {}, "#optGrid", "#optToggles");
   updateCmdPreview();
-  toast(`已套用範本「${t.name}」`, "ok");
+  markActiveTplChip(id);
+  _applyModeToGrid();   // basic mode: re-filter the grid to just this template's fields
+  if (!silent) toast(`已套用範本「${t.name}」`, "ok");
 }
 
 // ===== command preview (what will actually run) ===========================
@@ -499,9 +1341,15 @@ function buildCmdPreview() {
   if (tool === "sqlmap") val("--tamper", "tamper");
   val("--timeout", "timeout"); val("--time-sec", "time_sec"); val("--delay", "delay");
   val("--retries", "retries"); val("--prefix", "prefix"); val("--suffix", "suffix"); val("--proxy", "proxy");
+  if (o.headers) parts.push("--headers=" + String(o.headers).replace(/\r?\n/g, "\\n"));
+  val("--ignore-code", "ignore_code");
+  val("--string", "test_string"); val("--not-string", "not_string"); val("--code", "code");
+  if (tool === "sqlmap") { val("--regexp", "regexp"); val("--auth-type", "auth_type"); val("--auth-cred", "auth_cred"); val("--csrf-token", "csrf_token"); val("--csrf-url", "csrf_url"); }
+  if (o.text_only) parts.push("--text-only");
+  if (o.dump) parts.push("--dump");
+  if (tool === "sqlmap") { val("--sql-query", "sql_query"); val("--os-cmd", "os_cmd"); val("--file-read", "file_read"); val("--file-write", "file_write"); val("--file-dest", "file_dest"); if (o.dump_all) parts.push("--dump-all"); if (o.passwords) parts.push("--passwords"); }
   if (sel.length && desel.length) parts.push("-p " + sel.join(","));
-  if (tool === "sqlmap" && desel.length) parts.push("--skip=" + desel.join(","));
-  if (o.force_ssl) parts.push("--force-ssl");
+  if (o.force_ssl && tool === "sqlmap") parts.push("--force-ssl");   // ghauri: --force-ssl only affects cert verification, not scheme -> not passed
   if (o.random_agent) parts.push("--random-agent");
   const enums = [["get_banner", "--banner"], ["get_current_user", "--current-user"],
                  ["get_current_db", "--current-db"], ["get_hostname", "--hostname"], ["get_dbs", "--dbs"]];
@@ -515,9 +1363,55 @@ function updateCmdPreview() {
   const el = $("#cmdPreview"); if (!el) return;
   const cmd = buildCmdPreview();
   el.textContent = cmd || "選擇工具後,這裡會顯示實際會跑的指令。";
+  const ri = $("#riskIndicator"); if (!ri) return;
+  const tool = selectedTool();
+  if (!tool) { ri.className = "risk-line hidden"; ri.textContent = ""; return; }
+  const r = assessRisk(tool, gatherOptions("#optGrid", "#optToggles"));
+  if (r.level === "safe") { ri.className = "risk-line risk-safe"; ri.textContent = "風險評估:安全"; }
+  else {
+    ri.className = "risk-line risk-" + r.level;
+    const p = r.level === "danger" ? "⚠⚠ 危險:" : r.level === "high" ? "⚠ 高風險:" : "⚠ 偏高:";
+    ri.textContent = p + r.reasons.join(";");
+  }
 }
 
 // ===== launch =============================================================
+// Assess how intrusive the CURRENT options are, so the launch confirm can warn.
+// "risk 之類的等級設太高" -> high; noisy/heavy settings -> elevated.
+function assessRisk(tool, o) {
+  const reasons = []; let level = "safe";
+  const rank = { safe: 0, elevated: 1, high: 2, danger: 3 };
+  const bump = (lv, why) => { if (rank[lv] > rank[level]) level = lv; if (why) reasons.push(why); };
+  const risk = Number(o.risk), lvl = Number(o.level), thr = Number(o.threads);
+  if (tool === "sqlmap" && risk >= 3) bump("high", "risk=3:啟用 OR-based 等重量級 payload,若注入點落在 UPDATE/DELETE 語句可能『修改或刪除多列資料』(具破壞性)");
+  else if (tool === "sqlmap" && risk === 2) bump("elevated", "risk=2:加入 heavy-query/BENCHMARK 時間盲注,會讓目標 DB CPU 飆高(慢環境恐影響服務)");
+  // tamper(繞 WAF):payload 變形改寫,較 aggressive -- 之前完全沒評估到
+  if (tool === "sqlmap" && String(o.tamper || "").trim())
+    bump("elevated", "tamper(繞 WAF):把 payload 變形改寫,較 aggressive,且部分腳本只對特定 WAF/DBMS 有效、亂套可能讓 payload 失效");
+  // NOTE: technique 'S' 不再單獨警告 -- 兩工具預設就含 S,gatherOptions 又會省略等於預設的值,
+  // 導致「用預設(含 S)不警告、反而縮小選擇時才警告」的反效果;真正危險的寫入/取 shell 由 --sql-query/--os-cmd 涵蓋。
+  if (lvl >= 5) bump("elevated", "level=5:測試面最廣、請求量與噪音最大");
+  else if (lvl === 4) bump("elevated", "level=4:測試面較廣、較慢");
+  if (thr >= 10) bump("elevated", "threads=" + thr + ":高併發,對目標壓力大、較易觸發防護");
+  else if (thr >= 8) bump("elevated", "threads=" + thr + ":併發偏高");
+  // 危險旗標偵測:取 shell / 執行 SQL / 讀寫檔案 / 匯出資料
+  const DANGER = { sql_query: "執行任意 SQL(--sql-query)", os_cmd: "執行 OS 命令(--os-cmd)",
+    file_read: "讀取伺服器檔案(--file-read)", file_write: "寫入檔案到伺服器(--file-write)",
+    file_dest: "寫檔目標路徑(--file-dest)", dump: "匯出資料表(--dump)",
+    dump_all: "匯出整個 DB(--dump-all)", passwords: "抓密碼雜湊(--passwords)" };
+  const hit = Object.keys(DANGER).filter(k => o[k]);
+  if (hit.length) {
+    // code-execution / file-plant is strictly worse than data exfil -> lead with it
+    const rce = hit.filter(k => k === "os_cmd" || k === "file_write" || k === "file_dest");
+    const other = hit.filter(k => rce.indexOf(k) < 0);
+    let msg = "";
+    if (rce.length) msg += "⚠⚠⚠ 最高破壞性・遠端代碼執行/植入檔案:" + rce.map(k => DANGER[k]).join("、");
+    if (other.length) msg += (rce.length ? ";另含 " : "⚠⚠ 危險操作:") + other.map(k => DANGER[k]).join("、");
+    msg += " — 務必確認在授權範圍內(取 shell / 改資料 / 讀寫檔案)";
+    bump("danger", msg);
+  }
+  return { level, reasons };
+}
 async function launch() {
   if (!requireProject()) return;
   if (!state.parsed) { toast("請先解析請求", "err"); return; }
@@ -529,13 +1423,36 @@ async function launch() {
     toast("請至少勾選一個參數再開始掃描", "err"); return;
   }
   const opts = gatherOptions("#optGrid", "#optToggles");
+  const proj = (state.projects || []).find(p => p.id === state.projectId) || {};
+  // ALWAYS confirm before running -- never launch on a single click.
+  const risk = assessRisk(tool, opts);
+  const selCount = state.params.filter(p => p.selected).length;
+  const target = state.parsed.endpoint || (state.parsed.parsed && state.parsed.parsed.url) || "";
+  const riskHead = risk.level === "danger" ? "⚠⚠ 危險操作(高破壞性)"
+    : risk.level === "high" ? "⚠ 高風險設定" : "⚠ 偏高設定";
+  const riskHtml = risk.level === "safe" ? "" :
+    `<div class="risk-box risk-${risk.level}"><b>${riskHead}</b><ul>${risk.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul></div>`;
+  const ok = await confirmModal({
+    title: "確認開始掃描",
+    message: `工具 <b>${esc(tool)}</b> · 勾選 <b>${selCount}</b> 個參數<br>
+      <span class="mono-label">目標</span> ${esc(target)}
+      <div class="cmd-confirm">${esc(buildCmdPreview())}</div>${riskHtml}`,
+    okText: risk.level === "danger" ? "我了解具破壞性,仍要執行"
+      : risk.level === "high" ? "我了解風險,仍要開始" : "開始掃描",
+    cancelText: "再檢查一下",
+    danger: (risk.level === "high" || risk.level === "danger"),
+  });
+  if (!ok) return;
   const btn = $("#launchBtn"); btn.disabled = true;
   try {
     const r = await api("/api/scans", "POST", {
       raw: $("#rawInput").value.trim(), force_ssl: !!opts.force_ssl, project_id: state.projectId,
-      tool, options: opts, params: state.params, extra_flags: opts.extra_flags || "", restrict_ip: opts.restrict_ip || "",
+      tool, options: opts, params: state.params, extra_flags: opts.extra_flags || "",
+      restrict_ip: proj.restrict_ip || "",   // project-level memo, carried onto the scan
+      note: ($("#scanNote").value || "").trim(),
     });
     toast(`已加入掃描 #${(r.launched[0] || {}).id || ""}(背景執行中)`, "ok");
+    $("#scanNote").value = "";   // fresh note per run
     await loadScans();
   } catch (e) { toast("啟動失敗:" + e.message, "err"); }
   finally { btn.disabled = false; }
@@ -546,34 +1463,105 @@ async function loadScans() {
   if (state.projectId == null) { state.allScans = []; state.scans = []; renderBoardIfChanged(true); renderTreeIfChanged(true); return; }
   const q = new URLSearchParams({ project_id: state.projectId, limit: 500, slim: 1 });
   try { state.allScans = await api("/api/scans?" + q.toString()); } catch (e) { return; }
-  const status = $("#statusFilter").value;
-  state.scans = status ? state.allScans.filter(s => s.status === status) : state.allScans;
-  renderBoardIfChanged();
+  applyScanFilter();          // outcome filter -> state.scans + board + chip counts
   renderTreeIfChanged();
 }
-function boardSignature() { return state.scans.map(s => `${s.id}:${s.status}:${s.vulnerable}`).join("|") + "@" + state.detailId; }
+// filter chips are outcome-based (有漏洞/無洞/掃描中/失敗) so they match the row's
+// left-border colour axis, instead of the old raw-status dropdown.
+const SCAN_FILTERS = [
+  { key: "", label: "全部" },
+  { key: "vuln", label: "有漏洞" },
+  { key: "clean", label: "無洞" },
+  { key: "running", label: "掃描中" },
+  { key: "other", label: "失敗" },
+];
+function applyScanFilter(force) {
+  const f = state.scanFilter || "";
+  state.scans = f ? (state.allScans || []).filter(s => scanOutcome(s).key === f) : (state.allScans || []);
+  renderBoardIfChanged(force);
+  renderScanFilterChips();
+}
+function renderScanFilterChips() {
+  const box = $("#scanFilterChips"); if (!box) return;
+  const all = state.allScans || [];
+  const counts = {};
+  all.forEach(s => { const k = scanOutcome(s).key; counts[k] = (counts[k] || 0) + 1; });
+  const active = state.scanFilter || "";
+  const sig = active + "|" + SCAN_FILTERS.map(f => (f.key === "" ? all.length : (counts[f.key] || 0))).join(",");
+  if (box._sig === sig) return;   // counts/active unchanged -> skip (no poll churn / hover flicker)
+  box._sig = sig;
+  box.innerHTML = SCAN_FILTERS.map(f => {
+    const n = f.key === "" ? all.length : (counts[f.key] || 0);
+    const dot = f.key ? `<span class="fc-dot st-${f.key}"></span>` : "";
+    return `<button class="filter-chip${active === f.key ? " active" : ""}" data-filter="${f.key}">${dot}${f.label}<span class="fc-count">${n}</span></button>`;
+  }).join("");
+  $$("[data-filter]", box).forEach(el => el.onclick = () => { state.scanFilter = el.dataset.filter; applyScanFilter(true); });
+}
+function boardSignature() { const bp = _boardPending(); return state.scans.map(s => `${s.id}:${s.status}:${s.vulnerable}`).join("|") + "@" + state.detailId + "|P" + (bp ? bp.label : ""); }
 function renderBoardIfChanged(force) {
   const key = boardSignature();
   if (!force && key === state.boardKey) return;
   state.boardKey = key;
   const board = $("#scanBoard");
-  $("#boardEmpty").classList.toggle("hidden", state.scans.length > 0);
-  board.innerHTML = state.scans.map(renderScanRow).join("");
+  const bp = _boardPending();
+  $("#boardEmpty").classList.toggle("hidden", state.scans.length > 0 || !!bp);
+  const pendHtml = bp
+    ? `<div class="scan-pending${bp.parsed ? " parsed" : ""}" title="此分頁掃描後,結果會插入此清單"><span class="sp-dot"></span>${esc(bp.label)}</div>`
+    : "";
+  board.innerHTML = pendHtml + state.scans.map(renderScanRow).join("");
   $$(".scan-row", board).forEach(el => el.onclick = () => openScanDetail(parseInt(el.dataset.id, 10)));
   $$("[data-rowstop]", board).forEach(b => b.onclick = (e) => { e.stopPropagation(); stopScan(parseInt(b.dataset.rowstop, 10)); });
   $$("[data-rowdel]", board).forEach(b => b.onclick = (e) => { e.stopPropagation(); deleteScan(parseInt(b.dataset.rowdel, 10)); });
+  // only refresh composer badges when a RESULT actually changed -- not on merely
+  // opening a scan detail (which changes boardSignature via detailId).
+  const rKey = state.scans.map(s => `${s.id}:${s.status}:${s.vulnerable}`).join("|");
+  if (rKey !== state._resultsKey) { state._resultsKey = rKey; refreshParamBadges(); }
 }
+// Live-update the composer's per-parameter 測過/無洞/有漏洞 badges when a scan for
+// the currently-parsed endpoint finishes -- no need to re-paste + re-parse.
+async function refreshParamBadges() {
+  if (!state.parsed || state.projectId == null || !(state.params || []).length) return;
+  const sigEp = state.parsed.sig_endpoint; if (!sigEp) return;
+  let hist;
+  try { hist = await api(`/api/param-history?project_id=${state.projectId}&sig_endpoint=${encodeURIComponent(sigEp)}`); }
+  catch (e) { return; }
+  const by = {}; (hist || []).forEach(h => { by[h.location + "|" + h.name] = h; });
+  let changed = false;
+  state.params.forEach(p => {
+    const h = by[p.location + "|" + p.name];
+    const ns = h ? h.status : null, nv = h ? !!h.vulnerable : false, nc = h ? h.test_count : 0;
+    if (p.prior_status !== ns || p.prior_vulnerable !== nv || p.prior_test_count !== nc) {
+      p.prior_status = ns; p.prior_vulnerable = nv; p.prior_test_count = nc; changed = true;
+    }
+  });
+  if (changed) renderParams();
+}
+// THE single canonical outcome for a scan -> one label + one colour, used
+// everywhere (scan list, tree, detail header, verdict headline). This replaces the
+// old separate status badge + result chip so there is ONE colour axis, not three.
+function scanOutcome(s) {
+  if (s.vulnerable) return { key: "vuln", label: "有漏洞", cls: "st-vuln" };
+  if (s.status === "running" || s.status === "queued") return { key: "running", label: "掃描中", cls: "st-running" };
+  if (s.status === "done") return { key: "clean", label: "無洞", cls: "st-clean" };
+  if (s.status === "killed") return { key: "other", label: "已中止", cls: "st-other" };
+  return { key: "other", label: "失敗", cls: "st-other" };   // error / stopped
+}
+function stateChip(s) { const o = scanOutcome(s); return `<span class="state-chip ${o.cls}">${o.label}</span>`; }
 function renderScanRow(s) {
-  const st = scanState(s);   // vuln | running | clean | other  -> left accent + chip colour
-  const vuln = s.vulnerable ? '<span class="vuln-flag">●</span>' : "";
+  const st = scanOutcome(s).key;   // border colour matches the chip -> one axis
   const time = s.started_at ? new Date(s.started_at).toLocaleTimeString() : new Date(s.created_at).toLocaleTimeString();
   const dur = s.duration_ms ? " · " + fmtDur(s.duration_ms) : "";
   const canStop = s.status === "running" || s.status === "queued";
-  return `<div class="scan-row st-${st} ${s.id === state.detailId ? "active" : ""}" data-id="${s.id}">
-    <span class="status-chip ${s.status}">${s.status}</span>
+  const pouts = s.pouts || [];   // tested params (skipped omitted); v = has an injection point
+  const pchips = pouts.length
+    ? `<div class="scan-row-params">${pouts.map(po => `<span class="pchip ${po.v ? "pv" : "pc"}" title="${esc(po.n)}${po.v ? " · 有注入點" : " · 無注入點"}">${esc(po.n)}</span>`).join("")}</div>`
+    : "";
+  return `<div class="scan-row st-${st} ${s.id === state.detailId ? "active" : ""}${s.id === state.flashScanId ? " flash-target" : ""}" data-id="${s.id}">
+    ${stateChip(s)}
     <div class="scan-row-main">
-      <div class="scan-row-top"><span class="scan-tool">${esc(s.tool)}</span>${vuln}<span class="scan-meta">#${s.id} ${time}${dur}</span></div>
-      <div class="scan-ep" title="${esc(s.endpoint || s.url)}">${esc(s.endpoint || s.url)}</div>
+      <div class="scan-row-top"><span class="scan-tool">${esc(s.tool)}</span><span class="scan-id">#${s.id}</span></div>
+      <div class="scan-row-bot"><span class="scan-ep" title="${esc(s.endpoint || s.url)}">${esc(s.endpoint || s.url)}</span><span class="scan-meta">${time}${dur}</span></div>
+      ${pchips}
     </div>
     ${canStop
       ? `<button class="row-stop" data-rowstop="${s.id}" title="強制停止">停</button>`
@@ -672,9 +1660,9 @@ function compactChain(node) {
 function scanLeaf(s) {
   const t = new Date(s.started_at || s.created_at).toLocaleString();
   const method = s.method ? `<span class="method-chip">${esc(s.method)}</span>` : "";
-  return `<div class="tnode"><div class="trow tscan" data-scan="${s.id}"><span class="status-chip ${s.status}">${s.status}</span>${method}<span class="scan-tool">${esc(s.tool)}</span><span class="tscan-meta">#${s.id} ${esc(t)}</span>${s.vulnerable ? '<span class="vuln-flag">●</span>' : ""}<button class="tscan-del" data-delscan="${s.id}" title="刪除此掃描紀錄">✕</button></div></div>`;
+  return `<div class="tnode"><div class="trow tscan${s.id === state.detailId ? " detail-active" : ""}${s.id === state.flashScanId ? " flash-target" : ""}" data-scan="${s.id}">${stateChip(s)}${method}<span class="scan-tool">${esc(s.tool)}</span><span class="tscan-meta">#${s.id} ${esc(t)}</span><button class="tscan-del" data-delscan="${s.id}" title="刪除此掃描紀錄">✕</button></div></div>`;
 }
-function renderPathNode(host, rawNode, exp, cur) {
+function renderPathNode(host, rawNode, exp, cur, depth) {
   const { label, node } = compactChain(rawNode);
   const key = "p:" + host + "|" + node.path;
   const kids = [...node.children.values()];
@@ -683,24 +1671,33 @@ function renderPathNode(host, rawNode, exp, cur) {
   const st = subtreeState(node);
   const isCur = cur && cur.host === host && cur.path === node.path;
   const onPath = cur && cur.host === host && (cur.path === node.path || cur.path.startsWith(node.path + "/"));
-  const curChip = node.synthetic ? '<span class="cur-tag">目前(未測)</span>'
+  const curChip = node.synthetic ? '<span class="cur-tag ghost">目前(尚未掃描)</span>'
                 : (isCur ? '<span class="cur-tag">目前</span>' : '');
   const count = node.scans.length ? `<span class="tcount">${node.scans.length}</span>`
               : (kids.length ? `<span class="tcount">${kids.length}</span>` : '');
   let inner = "";
   if (open) {
     let parts = node.scans.slice().sort((a, b) => b.created_at - a.created_at).map(scanLeaf).join("");
-    parts += kids.sort((a, b) => a.seg.localeCompare(b.seg)).map(c => renderPathNode(host, c, exp, cur)).join("");
+    parts += kids.sort((a, b) => a.seg.localeCompare(b.seg)).map(c => renderPathNode(host, c, exp, cur, (depth || 0) + 1)).join("");
     inner = `<div class="tchildren">${parts}</div>`;
   }
   const caret = expandable ? (open ? "▾" : "▸") : "";
   const dataKey = expandable ? ` data-key="${esc(key)}"` : "";
-  return `<div class="tnode${onPath ? " on-path" : ""}"><div class="trow tep st-${st}"${dataKey}><span class="tcaret">${caret}</span><span class="tdot"></span><span class="tep-label">${esc(label)}</span>${curChip}${count}</div>${inner}</div>`;
+  // at a LAST node (no children), optionally APPEND the full domain+path as grey
+  // text after the node's own name, so you don't have to trace it down the tree.
+  const isLeaf = node.children.size === 0;
+  const fullSuffix = (state.treeFullPath && isLeaf && node.path)
+    ? `<span class="tep-full">${esc(host + node.path)}</span>` : "";
+  return `<div class="tnode${onPath ? " on-path" : ""}"><div class="trow tep tsticky st-${st}"${dataKey} style="top:calc(var(--th)*${depth || 0})"><span class="tcaret">${caret}</span><span class="tdot"></span><span class="tep-label" title="${esc(host + (node.path || ""))}">${esc(label)}</span>${fullSuffix}${curChip}${count}</div>${inner}</div>`;
 }
+// the synthetic "目前(尚未掃描)" node is a COMPOSING hint -> only on the dashboard,
+// never on settings/projects, so it can't be mistaken for a recorded scan.
+function _liveTarget() { return state.view === "dashboard" ? state.currentTarget : null; }
 function renderTreeIfChanged(force) {
-  const cur = state.currentTarget ? state.currentTarget.host + "|" + state.currentTarget.path : "";
+  const lt = _liveTarget();
+  const cur = lt ? lt.host + "|" + lt.path : "";
   const key = (state.allScans || []).map(s => s.id + ":" + s.status + ":" + s.vulnerable).join("|") +
-    "#" + Array.from(state.treeExpanded || []).join(",") + "@" + cur;
+    "#" + Array.from(state.treeExpanded || []).join(",") + "~" + Array.from(state.tempScanPath || []).join(",") + "@" + cur + "!" + (state.detailId || "") + "|P" + (_pendingCompose() ? 1 : 0);
   if (!force && key === state.treeKey) return;
   state.treeKey = key;
   renderTree();
@@ -708,10 +1705,16 @@ function renderTreeIfChanged(force) {
 function renderTree() {
   if (!state.treeExpanded) state.treeExpanded = loadTreeExpanded();
   const box = $("#treeBox"); const scans = state.allScans || [];
-  const cur = state.currentTarget; const exp = state.treeExpanded;
+  const cur = _liveTarget();
+  // manual (persisted) expansions unioned with the transient single-scan reveal
+  const exp = new Set([...(state.treeExpanded || []), ...(state.tempScanPath || [])]);
   const hosts = buildPathTree(scans, cur);
-  $("#treeEmpty").classList.toggle("hidden", Object.keys(hosts).length > 0);
-  box.innerHTML = Object.keys(hosts).sort().map(hn => {
+  const pend = _pendingCompose();
+  $("#treeEmpty").classList.toggle("hidden", Object.keys(hosts).length > 0 || pend);
+  const pendHtml = pend
+    ? `<div class="tnode"><div class="trow tpending"><span class="tcaret"></span><span class="tdot"></span><span class="tep-label">⏳ 待解析(此分頁)</span></div></div>`
+    : "";
+  box.innerHTML = pendHtml + Object.keys(hosts).sort().map(hn => {
     const rootNode = hosts[hn]; const hkey = "h:" + hn; const hopen = exp.has(hkey);
     const kids = [...rootNode.children.values()];
     const hState = subtreeState(rootNode);
@@ -719,65 +1722,281 @@ function renderTree() {
     let inner = "";
     if (hopen) {
       let parts = rootNode.scans.slice().sort((a, b) => b.created_at - a.created_at).map(scanLeaf).join("");
-      parts += kids.sort((a, b) => a.seg.localeCompare(b.seg)).map(c => renderPathNode(hn, c, exp, cur)).join("");
+      parts += kids.sort((a, b) => a.seg.localeCompare(b.seg)).map(c => renderPathNode(hn, c, exp, cur, 1)).join("");
       inner = `<div class="tchildren">${parts}</div>`;
     }
     const hCount = kids.length ? `<span class="tcount">${kids.length}</span>`
                  : (rootNode.scans.length ? `<span class="tcount">${rootNode.scans.length}</span>` : '');
-    return `<div class="tnode${hCur ? " on-path" : ""}"><div class="trow thost st-${hState}" data-key="${esc(hkey)}"><span class="tcaret">${hopen ? "▾" : "▸"}</span><span class="tdot"></span><span class="thost-name">${esc(hn)}</span>${hCount}</div>${inner}</div>`;
+    return `<div class="tnode${hCur ? " on-path" : ""}"><div class="trow thost tsticky st-${hState}" data-key="${esc(hkey)}" style="top:0"><span class="tcaret">${hopen ? "▾" : "▸"}</span><span class="tdot"></span><span class="thost-name">${esc(hn)}</span>${hCount}</div>${inner}</div>`;
   }).join("");
   $$(".trow[data-key]", box).forEach(el => el.onclick = () => toggleTreeNode(el.dataset.key));
   $$(".tscan[data-scan]", box).forEach(el => el.onclick = () => openScanDetail(parseInt(el.dataset.scan, 10)));
   $$("[data-delscan]", box).forEach(b => b.onclick = (e) => { e.stopPropagation(); deleteScan(parseInt(b.dataset.delscan, 10)); });
 }
+// keys of pure record-leaf endpoints (have scans, no child paths) -- the nodes whose
+// records the 展開含紀錄 accordion governs
+function _recordKeys() {
+  const set = new Set();
+  const hosts = buildPathTree(state.allScans || [], _liveTarget());
+  const walk = (host, node) => {
+    if (node.scans && node.scans.length > 0 && node.children.size === 0) set.add("p:" + host + "|" + node.path);
+    for (const c of node.children.values()) walk(host, c);
+  };
+  for (const hn of Object.keys(hosts)) walk(hn, hosts[hn]);
+  return set;
+}
 function toggleTreeNode(key) {
   if (!state.treeExpanded) state.treeExpanded = loadTreeExpanded();
-  if (state.treeExpanded.has(key)) state.treeExpanded.delete(key); else state.treeExpanded.add(key);
+  // a node can be open via the manual set OR the active-scan reveal (tempScanPath);
+  // collapsing must clear BOTH so the reveal can't re-open it every render.
+  const openNow = state.treeExpanded.has(key) || !!(state.tempScanPath && state.tempScanPath.has(key));
+  if (openNow) {
+    state.treeExpanded.delete(key);
+    if (state.tempScanPath) state.tempScanPath.delete(key);
+  } else {
+    // 展開含紀錄 OFF -> accordion: only ONE record-leaf's records open at a time
+    if (!state.treeFullRecords) {
+      const recs = _recordKeys();
+      if (recs.has(key)) {
+        for (const k of Array.from(state.treeExpanded)) if (k !== key && recs.has(k)) state.treeExpanded.delete(k);
+        if (state.tempScanPath) for (const k of Array.from(state.tempScanPath)) if (k !== key && recs.has(k)) state.tempScanPath.delete(k);
+      }
+    }
+    state.treeExpanded.add(key);
+  }
   saveTreeExpanded(); renderTreeIfChanged(true);
 }
-function treeExpandAll() {
-  const hosts = buildPathTree(state.allScans || [], state.currentTarget);
+// withRecords=false -> expand path structure down to the LAST nodes only (each
+// endpoint's individual scan records stay collapsed). withRecords=true -> expand
+// everything including the scan records. Default action is the former.
+function treeExpandAll(withRecords) {
+  const hosts = buildPathTree(state.allScans || [], _liveTarget());
   const set = new Set();
   const walk = (host, node, isRoot) => {
-    set.add(isRoot ? "h:" + host : "p:" + host + "|" + node.path);
+    const hasKids = node.children.size > 0;
+    if (isRoot || hasKids || (withRecords && node.scans.length > 0)) {
+      set.add(isRoot ? "h:" + host : "p:" + host + "|" + node.path);
+    }
     for (const c of node.children.values()) walk(host, c, false);
   };
   for (const hn of Object.keys(hosts)) walk(hn, hosts[hn], true);
-  state.treeExpanded = set;
+  state.treeExpanded = set; state.tempScanPath = new Set();
   saveTreeExpanded(); renderTreeIfChanged(true);
 }
-function treeCollapseAll() { state.treeExpanded = new Set(); saveTreeExpanded(); renderTreeIfChanged(true); }
+function treeCollapseAll() { state.treeExpanded = new Set(); state.tempScanPath = new Set(); saveTreeExpanded(); renderTreeIfChanged(true); }
+// toggling 展開含紀錄 now acts immediately (was: only affected the next 展開 click, which
+// felt unresponsive). ON -> expand the whole tree incl. every record; OFF -> hide the
+// record leaves (collapse pure record-leaf endpoints) while keeping node expansion.
+function applyFullRecordsToggle() {
+  if (state.treeFullRecords) { treeExpandAll(true); return; }
+  if (!state.treeExpanded) state.treeExpanded = loadTreeExpanded();
+  const hosts = buildPathTree(state.allScans || [], _liveTarget());
+  const walk = (host, node) => {
+    if (node.scans.length > 0 && node.children.size === 0) state.treeExpanded.delete("p:" + host + "|" + node.path);
+    for (const c of node.children.values()) walk(host, c);
+  };
+  for (const hn of Object.keys(hosts)) walk(hn, hosts[hn]);
+  saveTreeExpanded(); renderTreeIfChanged(true);
+}
+// remembered tree UI prefs (global, survive F5 + server restart via localStorage)
+function loadTreePrefs() {
+  try { state.treeFullPath = localStorage.getItem("treeFullPath") !== "0"; } catch (e) { state.treeFullPath = true; }
+  try { state.treeFullRecords = localStorage.getItem("treeFullRecords") === "1"; } catch (e) { state.treeFullRecords = false; }
+}
+function saveTreeFullPath() { try { localStorage.setItem("treeFullPath", state.treeFullPath ? "1" : "0"); } catch (e) {} }
+function saveTreeFullRecords() { try { localStorage.setItem("treeFullRecords", state.treeFullRecords ? "1" : "0"); } catch (e) {} }
 
 // ===== scan detail modal ==================================================
 function findingsHtml(s) {
   let f = s.result; if (!f && s.result_json) { try { f = JSON.parse(s.result_json); } catch (e) {} }
   const rows = [];
+  const kv = (k, v, cls) => rows.push(`<div class="kv"><b>${k}</b><span${cls ? ` class="${cls}"` : ""}>${esc(v)}</span></div>`);
+  if (s.note) rows.push(`<div class="kv wide"><b>備註</b><span>${esc(s.note)}</span></div>`);
   if (s.error) rows.push(`<div class="kv"><b>錯誤</b><span style="color:var(--danger)">${esc(s.error)}</span></div>`);
   if (f) {
-    if (f.dbms) rows.push(`<div class="kv"><b>DBMS</b><span>${esc(f.dbms)}</span></div>`);
-    if (f.parameters && f.parameters.length) rows.push(`<div class="kv"><b>可注入參數</b><span>${esc(f.parameters.join(" / "))}</span></div>`);
-    if (f.titles && f.titles.length) rows.push(`<div class="kv"><b>類型</b><span>${esc(f.titles.slice(0, 4).join("；"))}</span></div>`);
-    if (f.payloads && f.payloads.length) rows.push(`<div class="kv"><b>Payload</b><span class="mono-val">${esc(f.payloads[0])}</span></div>`);
+    if (f.dbms) kv("DBMS", f.dbms);
+    if (f.parameters && f.parameters.length) kv("可注入參數", f.parameters.join(" / "));
+    if (f.types && f.types.length) kv("類型", [...new Set(f.types)].join("；"));           // technique classes
+    if (f.titles && f.titles.length) kv("標題", f.titles.slice(0, 4).join("；"));            // was mislabelled 類型
+    if (f.payloads && f.payloads.length) rows.push(`<div class="kv"><b>Payload</b><span class="mono-val">${esc(f.payloads[0])}${f.payloads.length > 1 ? ` (共 ${f.payloads.length} 個)` : ""}</span></div>`);
+    // enumeration (only present when the run asked for --banner/--current-*/--is-dba/--dbs)
+    if (f.banner) kv("Banner", f.banner);
+    if (f.current_user) kv("目前使用者", f.current_user);
+    if (f.is_dba === true) kv("DBA 權限", "是(影響程度高)", "vuln-txt");
+    else if (f.is_dba === false) kv("DBA 權限", "否");
+    if (f.current_db) kv("目前資料庫", f.current_db);
+    if (f.hostname) kv("主機名", f.hostname);
+    if (f.databases_count != null) kv("資料庫數", f.databases_count);
+    if (f.web_tech) kv("Web 技術", f.web_tech);
+    // bonus non-SQLi heuristic findings surfaced during the SQLi run
+    if (f.heuristic_xss && f.heuristic_xss.length) kv("附帶・疑似 XSS", f.heuristic_xss.join(" / "));
+    if (f.heuristic_fi && f.heuristic_fi.length) kv("附帶・疑似 FI", f.heuristic_fi.join(" / "));
+    // reliability caveats explaining a possibly-false result
+    if (f.caveats && f.caveats.length) kv("可靠度提醒", f.caveats.map(c => c.note || c.marker).join("；"));
   }
   return rows.join("");
 }
+// per-parameter outcome (mirrors the backend param-history logic) so the detail
+// view can show WHICH params were tested / skipped / vulnerable / clean.
+function _paramOutcome(p, f, scanVuln) {
+  if (!p.selected) return { label: "已略過", cls: "st-skip" };
+  const pp = (f && f.per_param) || {};
+  const vulnNames = (f && f.parameters) || [];
+  if (vulnNames.indexOf(p.name) >= 0 || pp[p.name] === "vulnerable") return { label: "有漏洞", cls: "st-vuln" };
+  if (pp[p.name] === "clean" || !scanVuln) return { label: "無洞", cls: "st-clean" };
+  return { label: "已測", cls: "st-other" };   // vuln found elsewhere, this one inconclusive
+}
+function _reqSummaryHtml(s) {
+  const { host, ep } = splitEndpoint(s);
+  const sp = ep.indexOf(" ");
+  const method = sp >= 0 ? ep.slice(0, sp) : "?";
+  const path = sp >= 0 ? ep.slice(sp + 1) : ep;
+  let opts = s.options; if (!opts && s.options_json) { try { opts = JSON.parse(s.options_json); } catch (e) {} }
+  const okeys = opts ? Object.keys(opts).filter(k => opts[k] !== "" && opts[k] != null && opts[k] !== false) : [];
+  const rows = [["方法", method], ["主機", host], ["路徑", path], ["工具", s.tool]];
+  let html = rows.map(([k, v]) => `<div class="kv"><b>${k}</b><span>${esc(v)}</span></div>`).join("");
+  if (s.note) html += `<div class="kv wide"><b>備註</b><span>${esc(s.note)}</span></div>`;
+  if (okeys.length) html += `<div class="kv wide"><b>選項</b><span class="mono-val">${esc(okeys.map(k => opts[k] === true ? k : k + "=" + opts[k]).join("  "))}</span></div>`;
+  return html;
+}
+// evidence keyword(s) the auto-verdict hit in the log (scan-level), e.g. 「is vulnerable」
+function _scanEvidence() {
+  const { markers } = _parseVerdict(state.detailCache || "");
+  return markers.length ? markers.map(m => `「${m}」`).join("、") : "";
+}
+function _wafNoteHtml() {
+  const { items } = _parseVerdict(state.detailCache || "");
+  const waf = (items || []).find(it => /WAF|IPS/.test(it.label));
+  if (!waf) return "";
+  return `<div class="sd-card"><div class="sd-sec-title">判定 · 防護偵測</div>`
+    + `<div class="pv-list"><div class="pv-row st-waf"><span class="state-chip st-other">WAF/IPS</span>`
+    + `<span class="pv-name">偵測到防護</span>`
+    + `<span class="pv-ev">${esc(waf.value)}${waf.note ? " · " + esc(waf.note) : ""}</span></div></div></div>`;
+}
+// The verdict IS the per-parameter breakdown -- which params were tested and whether
+// each has an injection point (red) / is clean (green) / was skipped (grey), ordered
+// vuln -> clean -> inconclusive -> skipped, each with its matched-keyword evidence.
+function _paramsVerdictHtml(s) {
+  let params = s.params; if (!params && s.params_json) { try { params = JSON.parse(s.params_json); } catch (e) {} }
+  if (!Array.isArray(params) || !params.length) return `<div class="sd-sec-title">判定 · 參數</div><div class="empty small">此請求沒有解析到參數。</div>`;
+  let f = s.result; if (!f && s.result_json) { try { f = JSON.parse(s.result_json); } catch (e) {} }
+  const scanVuln = !!s.vulnerable;
+  const ev = _scanEvidence();
+  const order = { "st-vuln": 0, "st-clean": 1, "st-other": 2, "st-skip": 3 };
+  const rows = params.map(p => ({ p, oc: _paramOutcome(p, f, scanVuln) }));
+  // ghauri often reports an injection WITHOUT naming the parameter; if the scan is
+  // vulnerable, nothing got attributed, and exactly one param was tested, that param
+  // IS the one -> attribute it (safe single-param inference; multi-param stays as-is).
+  const sel = rows.filter(r => r.p.selected);
+  if (scanVuln && !rows.some(r => r.oc.cls === "st-vuln") && sel.length === 1) sel[0].oc = { label: "有漏洞", cls: "st-vuln" };
+  rows.sort((a, b) => (order[a.oc.cls] == null ? 9 : order[a.oc.cls]) - (order[b.oc.cls] == null ? 9 : order[b.oc.cls]));
+  const body = rows.map(({ p, oc }) => {
+    let evidence;
+    if (oc.cls === "st-vuln") evidence = ev ? "命中 " + ev : "偵測到注入點";
+    else if (oc.cls === "st-clean") evidence = "無注入點";
+    else if (oc.cls === "st-skip") evidence = "未勾選,本次未測試";
+    else evidence = "已測,此參數無定論";
+    return `<div class="pv-row ${oc.cls}"><span class="state-chip ${oc.cls}">${oc.label}</span>`
+      + `<span class="pv-name">${esc(p.name)}</span><span class="loc-chip">${esc(p.location || "?")}</span>`
+      + `<span class="pv-val" title="${esc(p.value || "")}">${esc(p.value || "")}</span>`
+      + `<span class="pv-ev">${esc(evidence)}</span></div>`;
+  }).join("");
+  const n = params.length, tested = params.filter(p => p.selected).length;
+  return `<div class="sd-sec-title">判定 · 參數 · 測 ${tested} / 略過 ${n - tested}</div><div class="pv-list">${body}</div>`;
+}
+// write-only-if-changed: hydrating the detail from the full fetch becomes a visual
+// no-op when the data matches the cache paint -> no repaint, no flash (stale-while-
+// revalidate). el._h / el._t cache the last written value.
+function setHTML(el, html) { if (el && el._h !== html) { el.innerHTML = html; el._h = html; } }
+function setText(el, txt) { if (el && el._t !== txt) { el.textContent = txt; el._t = txt; } }
 function renderScanDetail(s) {
   if (!s) return;
-  $("#sdTitle").textContent = `${s.tool} · #${s.id}`;
+  state.detailScan = s;   // remember the full scan so a log-pull can re-render the param verdict with fresh evidence
+  setHTML($("#sdTitle"), `${stateChip(s)}<span class="dt-name">${esc(s.tool)} · #${s.id}</span>`);
   const dur = s.duration_ms ? " · " + fmtDur(s.duration_ms) : "";
-  $("#sdMeta").innerHTML = ` <span class="status-chip ${s.status}">${s.status}</span> ${esc(s.endpoint || s.url)} · ${esc(fmtTime(s.started_at || s.created_at))}${dur}${s.vulnerable ? ' · <span class="vuln-flag">有漏洞</span>' : ""}`;
-  $("#sdFindings").innerHTML = findingsHtml(s);
+  setHTML($("#sdMeta"), `<span class="mono-val">${esc(s.endpoint || s.url)}</span> · ${esc(fmtTime(s.started_at || s.created_at))}${dur}`);
+  setHTML($("#sdVerdict"), _wafNoteHtml());          // just the WAF caveat now; the verdict itself is the param list
+  setHTML($("#sdParams"), _paramsVerdictHtml(s));
+  setHTML($("#sdRequest"), _reqSummaryHtml(s));
+  setText($("#sdRaw"), s.raw || "");                 // -r request; space is reserved so filling it later doesn't jump
+  setHTML($("#sdFindings"), findingsHtml(s));
   const canStop = s.status === "running" || s.status === "queued";
-  $("#sdActions").innerHTML = canStop ? `<button class="btn ghost sm danger-btn" id="sdStop">中止此掃描</button>` : "";
+  const actHtml = (canStop ? `<button class="btn ghost sm danger-btn" id="sdStop">中止此掃描</button>` : "")
+    + `<button class="btn ghost sm" id="sdReconfig" title="用這次的請求+工具+選項+勾選,開一個新的可編輯分頁">以此設定重新配置(開新分頁)</button>`
+    + `<button class="btn ghost sm danger-btn" id="sdDelete2" title="刪除此掃描紀錄">刪除此掃描紀錄</button>`;
+  const actEl = $("#sdActions"); setHTML(actEl, actHtml);
+  // always (re)bind so handlers close over the FRESHEST s (raw etc.), even on a no-op write
   const stop = $("#sdStop"); if (stop) stop.onclick = () => stopScan(s.id);
+  const recfg = $("#sdReconfig"); if (recfg) recfg.onclick = () => reconfigureFromScan(s);
+  const del = $("#sdDelete2"); if (del) del.onclick = () => deleteScan(s.id);
 }
-async function openScanDetail(id) {
-  state.detailId = id; state.detailOffset = 0; state.detailCache = "";
-  $("#sdLog").textContent = "(載入中…)";
-  try { renderScanDetail(await api(`/api/scans/${id}`)); } catch (e) {}
-  showModal("scanDetailModal");
-  await pullDetailLog();
-  renderBoardIfChanged(true);
+// #8: load a past scan's exact request + settings back into the composer so the
+// user can tweak and re-run, instead of being stuck on the read-only detail view.
+async function reconfigureFromScan(s) {
+  closeModals();
+  showDashboard();
+  composeTabNew();   // open a NEW tab -> never clobbers the current composition
+  state.scanMode = "advanced";   // reconfigure is for tweaking -> force an editable form
+                                 // (basic mode would load the options into a disabled/filtered grid)
+  if (s.raw) {
+    $("#rawInput").value = s.raw;
+    await parseRequest();   // fresh parse -> current param history badges
+  }
+  if (s.tool) selectTool(s.tool);
+  let opts = s.options; if (!opts && s.options_json) { try { opts = JSON.parse(s.options_json); } catch (e) {} }
+  opts = opts || {};
+  applyOptions(opts, "#optGrid", "#optToggles");
+  markActiveTplChip(-1);   // custom config -> no active template
+
+  // restore per-parameter selections by (location,name); collect any that were
+  // to be tested but no longer exist in the freshly-parsed request.
+  let saved = s.params; if (!saved && s.params_json) { try { saved = JSON.parse(s.params_json); } catch (e) {} }
+  const missingParams = [];
+  if (Array.isArray(saved)) {
+    const curByKey = {}; (state.params || []).forEach(p => { curByKey[p.location + "|" + p.name] = p; });
+    saved.forEach(sp => {
+      const key = sp.location + "|" + sp.name;
+      if (key in curByKey) curByKey[key].selected = !!sp.selected;
+      else if (sp.selected) missingParams.push(`${sp.name}(${sp.location})`);
+    });
+    renderParams();
+  }
+  // detect options that didn't fully carry over (schema changed / value no
+  // longer valid, e.g. an old free-text DBMS not in the new dropdown).
+  const applied = gatherOptions("#optGrid", "#optToggles");
+  const droppedOpts = [];
+  for (const k in opts) {
+    if (k === "restrict_ip") continue;   // no longer a composer option (project memo)
+    const el = $(`#optGrid [data-optkey="${k}"]`) || $(`#optToggles [data-optkey="${k}"]`);
+    let same;
+    if (el && el.classList && el.classList.contains("opt-checks")) {
+      // checkbox groups: compare as a SET (order/casing of a legacy free-text
+      // technique/tamper value differs from the canonical re-gathered string).
+      const join = el.dataset.join != null ? el.dataset.join : ",";
+      const toSet = v => new Set(join === "" ? String(v == null ? "" : v).split("")
+        : String(v == null ? "" : v).split(join).map(s => s.trim()).filter(Boolean));
+      const a = toSet(opts[k]), b = toSet(applied[k]);
+      same = a.size === b.size && [...a].every(x => b.has(x));
+    } else {
+      same = JSON.stringify(opts[k]) === JSON.stringify(applied[k]);
+    }
+    if (!same) droppedOpts.push(`${k}=${opts[k]}`);
+  }
+  if (s.note != null) $("#scanNote").value = s.note;
+  updateCmdPreview();
+
+  // ACTIVELY surface any mismatch -- silent degradation would let you re-run a
+  // "same" test that quietly isn't the same.
+  const warns = [];
+  if (missingParams.length) warns.push(`原本要測、但目前請求裡已無的參數:${missingParams.join("、")}`);
+  if (droppedOpts.length) warns.push(`未完整套用的選項:${droppedOpts.join("、")}`);
+  if (warns.length) {
+    const prev = $("#parseWarn").textContent;
+    $("#parseWarn").textContent = (prev ? prev + "  " : "") + "⚠ 帶回落差 — " + warns.join(";");
+    toast("已載入,但有設定沒完整帶回(見上方 ⚠,務必檢查)", "err");
+  } else {
+    toast("已完整載入此掃描的設定,可調整後重新開始", "ok");
+  }
 }
 let _pullingLog = false;
 async function pullDetailLog() {
@@ -791,10 +2010,78 @@ async function pullDetailLog() {
     if (state.detailId !== forId) return;   // user switched scans mid-request
     if (r.chunk) {
       state.detailCache += r.chunk; state.detailOffset = r.offset;
-      const view = $("#sdLog"); const atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
-      view.textContent = state.detailCache; if (atBottom) view.scrollTop = view.scrollHeight;
-    } else if (!state.detailCache) { $("#sdLog").textContent = "(尚無輸出)"; }
+      const st = (state.logs = state.logs || {});
+      st[forId] = { cache: state.detailCache, offset: state.detailOffset };   // per-scan cache -> instant revisit
+      const ord = (state._logOrder = (state._logOrder || []).filter(x => x !== forId)); ord.push(forId);
+      while (ord.length > 8) { const old = ord.shift(); if (old !== state.detailId) delete st[old]; }   // LRU cap -> bounded memory
+      _renderDetailLog();
+    } else if (!state.detailCache) { const lv = $("#sdLog"); if (lv) lv.textContent = "(尚無輸出)"; }
   } catch (e) {} finally { _pullingLog = false; }
+}
+// Parse the 【判定】 block from the log into a structured verdict + the set of
+// marker keywords it hit, so we can render a pretty panel AND highlight the exact
+// evidence lines in the raw log.
+function _parseVerdict(text) {
+  const items = [], markers = new Set();
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const i = raw.indexOf("【判定】");
+    if (i < 0) continue;
+    const body = raw.slice(i + 4).trim();   // "【判定】" is 4 chars
+    if (!body || /^[─-]+/.test(body) || body.startsWith("自動判讀依據") || body.startsWith("結束")) continue;
+    (body.match(/[「『](.+?)[」』]/g) || []).forEach(m => markers.add(m.slice(1, -1)));
+    if (body.startsWith("依據行")) continue;   // evidence pointer, not a summary row
+    const arrow = body.split("←");
+    const main = arrow[0].trim(), note = arrow.slice(1).join("←").trim();
+    const c = main.search(/[::]/);
+    const label = c >= 0 ? main.slice(0, c).trim() : main;
+    const value = c >= 0 ? main.slice(c + 1).trim() : "";
+    items.push({ label, value, note });
+  }
+  return { items, markers: [...markers] };
+}
+// ONE clear conclusion: a big headline (有漏洞/無洞/掃描中/失敗, coloured) with the
+// evidence as a sub-line -- NOT a separate 有漏洞 + 狀態 split. DBMS/params live in
+// the request+findings sections so they're not duplicated here; WAF stays.
+function _verdictPanelHtml(items, scan) {
+  if (!scan) return "";
+  const oc = scanOutcome(scan);
+  const note = (re) => { const it = (items || []).find(x => re.test(x.label)); return it ? (it.note || it.value) : ""; };
+  const sub = oc.key === "vuln" ? note(/有漏洞/) : (note(/狀態/) || note(/有漏洞/));
+  const waf = (items || []).find(it => /WAF|IPS/.test(it.label));
+  const wafRow = waf
+    ? `<div class="vd-row vd-waf"><span class="vd-label">${esc(waf.label)}</span><span class="vd-value">${esc(waf.value)}</span>${waf.note ? `<span class="vd-note">${esc(waf.note)}</span>` : ""}</div>`
+    : "";
+  return `<div class="verdict-panel"><div class="vd-title">🔎 自動判定</div>`
+    + `<div class="vd-headline ${oc.cls}"><span class="vd-hl-label">${esc(oc.label)}</span>${sub ? `<span class="vd-hl-note">${esc(sub)}</span>` : ""}</div>${wafRow}</div>`;
+}
+// is the user currently selecting text inside `el`? (don't clobber an in-progress copy)
+function _selectionInside(el) {
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+  return (sel.anchorNode && el.contains(sel.anchorNode)) || (sel.focusNode && el.contains(sel.focusNode));
+}
+// render the log with the verdict block + its evidence lines highlighted
+function _renderDetailLog() {
+  const text = state.detailCache || "";
+  const { items, markers } = _parseVerdict(text);
+  const scan = state.detailScan || (state.allScans || []).find(x => x.id === state.detailId);
+  const vp = $("#sdVerdict"); if (vp) vp.innerHTML = _wafNoteHtml();                       // WAF caveat
+  const pv = $("#sdParams"); if (pv && scan) pv.innerHTML = _paramsVerdictHtml(scan);       // verdict = param list, w/ fresh evidence
+  const view = $("#sdLog"); if (!view) return;
+  // a running scan re-renders the log every ~2s; rebuilding innerHTML wipes any text the
+  // user is selecting to copy (payload/evidence). Skip the rebuild while a selection is
+  // live inside the log -- the next poll re-renders once they release.
+  if (_selectionInside(view)) return;
+  const atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+  const lows = markers.map(m => m.toLowerCase()).filter(Boolean);
+  view.innerHTML = text.split(/\r?\n/).map(line => {
+    const e = esc(line);
+    if (line.includes("【判定】")) return `<span class="log-verdict">${e}</span>`;
+    const low = line.toLowerCase();
+    if (lows.some(m => low.includes(m))) return `<mark class="log-hit">${e}</mark>`;
+    return e;
+  }).join("\n");
+  if (atBottom) view.scrollTop = view.scrollHeight;
 }
 async function stopScan(id) {
   try { await api(`/api/scans/${id}/stop`, "POST"); toast("已送出中止(實際殺掉程序後才會標記 killed)", "ok"); }
@@ -809,7 +2096,18 @@ async function deleteScan(id) {
   if (!ok) return;
   try {
     await api(`/api/scans/${id}`, "DELETE");
-    if (state.detailId === id) { state.detailId = null; closeModals(); }
+    // close any read-only detail tab that was showing this scan
+    const dt = (state.tabs || []).find(x => x.kind === "detail" && x.scanId === id);
+    if (dt) {
+      const idx = state.tabs.findIndex(x => x.id === dt.id);
+      state.tabs.splice(idx, 1);
+      if (!state.tabs.length) state.tabs = [_blankTab()];
+      if (state.activeTabId === dt.id) applyTab(state.tabs[Math.max(0, idx - 1)] || state.tabs[0]);
+      else renderComposeTabs();
+    }
+    if (state.detailId === id) state.detailId = null;
+    if (state.logs) delete state.logs[id];   // drop this scan's cached log
+    if (state._logOrder) state._logOrder = state._logOrder.filter(x => x !== id);
     toast("已刪除掃描紀錄", "ok");
     await loadScans();
   } catch (e) { toast("刪除失敗:" + e.message, "err"); }
@@ -818,10 +2116,19 @@ async function deleteScan(id) {
 // ===== poll loop ==========================================================
 async function tick() {
   await loadScans();
-  if (state.detailId != null && !$("#scanDetailModal").classList.contains("hidden")) {
-    try { renderScanDetail(await api(`/api/scans/${state.detailId}`)); } catch (e) {}
+  const at = _activeTab();
+  if (at && at.kind === "detail" && state.detailId != null) {   // live-refresh the read-only detail tab
+    const forId = state.detailId;
+    try { const s = await api(`/api/scans/${forId}`); if (state.detailId === forId) renderScanDetail(s); } catch (e) {}
     await pullDetailLog();
   }
+}
+// board/tree/log poll interval — configurable in settings, applied live
+let _tickTimer = null;
+function applyScanRefresh() {
+  const sec = (state.settings && Number(state.settings.scan_refresh_seconds)) || 2;
+  if (_tickTimer) clearInterval(_tickTimer);
+  _tickTimer = setInterval(tick, Math.max(500, sec * 1000));
 }
 
 // ===== views ==============================================================
@@ -832,7 +2139,11 @@ function setView(v) {
   $("#dashboardView").classList.toggle("hidden", v !== "dashboard");
   $("#projectsView").classList.toggle("hidden", v !== "projects");
   $("#settingsView").classList.toggle("hidden", v !== "settings");
+  // 專案總覽 is a "you've left the project, re-pick one" lobby -> hide the current-
+  // project indicator so it doesn't say where you were.
+  const hm = document.querySelector(".header-left"); if (hm) hm.classList.toggle("on-projects", v === "projects");
   syncPanels();
+  if (changed) renderTreeIfChanged(true);   // drop/restore the "目前" composing hint per view
   if (!_firstView && changed) playViewEnter();
   _firstView = false;
 }
@@ -843,7 +2154,10 @@ function playViewEnter() {
   void el.offsetWidth;          // reflow so the animation restarts each switch
   el.classList.add("view-enter");
 }
-function showDashboard() { setView("dashboard"); }
+function showDashboard() {
+  setView("dashboard");
+  const _t = selectedTool(); if (_t) populateTemplateDropdown(_t);   // refresh chips (order may have changed in settings)
+}
 function showSettings(tab) {
   if (!requireProject()) return;
   setView("settings");
@@ -862,7 +2176,8 @@ function switchTab(name) {
 // ----- general -----
 async function loadGeneralSettings() {
   state.settings = await api("/api/settings");
-  $("#setMax").value = state.settings.max_concurrent; $("#setPort").value = state.settings.port;
+  $("#setMax").value = state.settings.max_concurrent;
+  $("#setScanRefresh").value = state.settings.scan_refresh_seconds || 2;
   $("#setIpRefresh").value = state.settings.ip_refresh_seconds;
   $("#setPublicIp").checked = !!state.settings.public_ip_lookup; $("#setAutoOpen").checked = !!state.settings.auto_open_browser;
   $("#setDefaultTool").value = state.settings.default_tool || "sqlmap";
@@ -870,13 +2185,15 @@ async function loadGeneralSettings() {
 async function saveGeneralSettings() {
   try {
     state.settings = await api("/api/settings", "POST", {
-      max_concurrent: Number($("#setMax").value) || 8, port: Number($("#setPort").value) || 8776,
+      max_concurrent: Number($("#setMax").value) || 3,
       ip_refresh_seconds: Number($("#setIpRefresh").value) || 60,
+      scan_refresh_seconds: Number($("#setScanRefresh").value) || 2,
       public_ip_lookup: $("#setPublicIp").checked, auto_open_browser: $("#setAutoOpen").checked,
       default_tool: $("#setDefaultTool").value,
     });
     setIpSeconds(state.settings.ip_refresh_seconds); doIpRefresh();
-    toast("已儲存(併發/埠變更需重啟)", "ok");
+    applyScanRefresh();   // takes effect immediately, no restart
+    toast("已儲存(併發數變更需重啟,其餘即時生效)", "ok");
   } catch (e) { toast("儲存失敗:" + e.message, "err"); }
 }
 
@@ -905,11 +2222,15 @@ async function loadRules() {
       <td>${esc(r.note || "")}</td>
       <td><button class="link-btn del nowrap" data-del="${r.id}">刪除</button></td>
     </tr>`).join("");
-  $$("[data-toggle]", tb).forEach(cb => cb.onchange = async () => { await api(`/api/rules/${cb.dataset.toggle}`, "PATCH", { enabled: cb.checked }); });
+  $$("[data-toggle]", tb).forEach(cb => cb.onchange = async () => {
+    try { await api(`/api/rules/${cb.dataset.toggle}`, "PATCH", { enabled: cb.checked }); }
+    catch (e) { cb.checked = !cb.checked; toast("更新失敗:" + e.message, "err"); }  // revert the visual on failure
+  });
   $$("[data-del]", tb).forEach(b => b.onclick = async () => {
     const okDel = await confirmModal({ title: "刪除過濾規則", message: "確定刪除這條過濾規則?", okText: "刪除" });
     if (!okDel) return;
-    await api(`/api/rules/${b.dataset.del}`, "DELETE"); loadRules();
+    try { await api(`/api/rules/${b.dataset.del}`, "DELETE"); loadRules(); toast("已刪除規則", "ok"); }
+    catch (e) { toast("刪除失敗:" + e.message, "err"); }
   });
 }
 async function addRule() {
@@ -923,9 +2244,9 @@ async function addRule() {
 }
 
 // ----- template editor (shared options component) -----
-function teSelectedTool() { const el = $('input[name="teTool"]:checked'); return el ? el.value : ""; }
+// the template's tool IS the current sub-tab (state.tplTool) -- no separate radio
+function teSelectedTool() { return state.tplTool || "sqlmap"; }
 function teSelectTool(tool) {
-  const r = $(`input[name="teTool"][value="${tool}"]`); if (r) r.checked = true;
   renderOptions(tool, "#teOptGrid", "#teOptToggles", "#teToolLabel");
 }
 async function openTemplateEditor() {
@@ -944,18 +2265,47 @@ function showTplEmpty() {
   $("#tplEmpty").classList.remove("hidden");
   renderTemplateList();
 }
+// client-side template order (per tool), drag-reordered + persisted in localStorage
+let _dragTplId = null;
+function _tplOrderKey(tool) { return "tplOrder:" + (tool || state.tplTool || "sqlmap"); }
+function _tplOrder(tool) { try { return JSON.parse(localStorage.getItem(_tplOrderKey(tool)) || "[]"); } catch (e) { return []; } }
+function _sortByTplOrder(list, tool) {
+  const ord = _tplOrder(tool), at = id => { const i = ord.indexOf(id); return i < 0 ? 1e9 : i; };
+  return list.slice().sort((a, b) => at(a.id) - at(b.id));   // unknown (new) templates fall to the end
+}
+function _reorderTpl(fromId, toId, after) {
+  if (fromId == null || fromId === toId) return;
+  const list = _sortByTplOrder((state.templates || []).filter(t => ((t.data && t.data.tool) || t.tool) === (state.tplTool || "sqlmap")));
+  let ids = list.map(t => t.id).filter(id => id !== fromId);
+  const ti = ids.indexOf(toId); if (ti < 0) return;
+  ids.splice(after ? ti + 1 : ti, 0, fromId);
+  try { localStorage.setItem(_tplOrderKey(), JSON.stringify(ids)); } catch (e) {}
+  renderTemplateList();
+}
 function renderTemplateList() {
   const box = $("#tplListBox");
-  // only this tool's templates; its default is pinned on top (backend orders is_default first)
-  const list = (state.templates || []).filter(t => ((t.data && t.data.tool) || t.tool) === (state.tplTool || "sqlmap"));
+  const list = _sortByTplOrder((state.templates || []).filter(t => ((t.data && t.data.tool) || t.tool) === (state.tplTool || "sqlmap")));
   if (!list.length) { box.innerHTML = `<div class="empty small">此工具尚無範本,按「＋ 新範本」建立。</div>`; return; }
-  box.innerHTML = list.map(t => `
-    <div class="tpl-item ${t.id === state.editingTplId ? "active" : ""} ${t.is_default ? "is-default" : ""}" data-tpl="${t.id}">
+  box.innerHTML = list.map(t => {
+    const d = (t.data && t.data.danger) || "normal";
+    const dlabel = { safe: "安全", normal: "一般", high: "高風險" }[d] || "一般";
+    const desc = (t.data && t.data.desc) || "";
+    return `
+    <div class="tpl-item ${t.id === state.editingTplId ? "active" : ""} ${t.is_default ? "is-default" : ""}" data-tpl="${t.id}" draggable="true">
       <span class="scan-tool">${esc((t.data && t.data.tool) || t.tool || "?")}</span>
       <span class="tpl-name">${esc(t.name)}</span>
+      <span class="badge danger-badge danger-${esc(d)}">${dlabel}</span>
       ${t.is_default ? '<span class="badge tested">★ 預設</span>' : ""}
-    </div>`).join("");
-  $$("[data-tpl]", box).forEach(el => el.onclick = () => teLoadTemplate(Number(el.dataset.tpl)));
+      ${desc ? `<span class="tpl-desc">${esc(desc)}</span>` : ""}
+    </div>`; }).join("");
+  const clr = () => $$(".tpl-item.drop-before,.tpl-item.drop-after", box).forEach(x => x.classList.remove("drop-before", "drop-after"));
+  $$("[data-tpl]", box).forEach(el => {
+    el.onclick = () => teLoadTemplate(Number(el.dataset.tpl));
+    el.ondragstart = (e) => { _dragTplId = Number(el.dataset.tpl); try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(_dragTplId)); } catch (x) {} el.classList.add("dragging"); };
+    el.ondragend = () => { el.classList.remove("dragging"); clr(); _dragTplId = null; };
+    el.ondragover = (e) => { e.preventDefault(); clr(); if (_dragTplId == null || Number(el.dataset.tpl) === _dragTplId) return; const r = el.getBoundingClientRect(); el.classList.add((e.clientY - r.top) > r.height / 2 ? "drop-after" : "drop-before"); };
+    el.ondrop = (e) => { e.preventDefault(); const r = el.getBoundingClientRect(); _reorderTpl(_dragTplId, Number(el.dataset.tpl), (e.clientY - r.top) > r.height / 2); };
+  });
 }
 function applyTplListWidth() {
   try { const w = localStorage.getItem("tplListW"); if (w && $("#tplList")) $("#tplList").style.width = w + "px"; } catch (e) {}
@@ -984,6 +2334,8 @@ function teNewTemplate() {
   $("#tplForm").classList.remove("hidden");
   $("#teName").value = "";
   $("#teDefault").checked = false;
+  if ($("#teDanger")) $("#teDanger").value = "normal";
+  if ($("#teDesc")) $("#teDesc").value = "";
   teSelectTool(state.tplTool || "sqlmap");
   applyOptions({}, "#teOptGrid", "#teOptToggles");
   $("#teDelete").classList.add("hidden");
@@ -996,6 +2348,8 @@ function teLoadTemplate(id) {
   $("#tplForm").classList.remove("hidden");
   $("#teName").value = t.name;
   $("#teDefault").checked = !!t.is_default;
+  if ($("#teDanger")) $("#teDanger").value = (t.data && t.data.danger) || "normal";
+  if ($("#teDesc")) $("#teDesc").value = (t.data && t.data.desc) || "";
   const tool = (t.data && t.data.tool) || "sqlmap";
   teSelectTool(tool);
   applyOptions((t.data && t.data.options) || {}, "#teOptGrid", "#teOptToggles");
@@ -1006,7 +2360,9 @@ async function teSave() {
   const name = $("#teName").value.trim(); const tool = teSelectedTool();
   if (!name) { toast("請填範本名稱", "err"); return; }
   if (!tool) { toast("請選擇工具", "err"); return; }
-  const payload = { name, tool, is_default: $("#teDefault").checked, data: { tool, options: gatherOptions("#teOptGrid", "#teOptToggles") } };
+  const danger = ($("#teDanger") && $("#teDanger").value) || "normal";
+  const desc = ($("#teDesc") && $("#teDesc").value.trim()) || "";
+  const payload = { name, tool, is_default: $("#teDefault").checked, data: { tool, danger, desc, options: gatherOptions("#teOptGrid", "#teOptToggles") } };
   try {
     if (state.editingTplId) await api(`/api/templates/${state.editingTplId}`, "PATCH", payload);
     else { const t = await api("/api/templates", "POST", payload); state.editingTplId = t.id; }
@@ -1021,22 +2377,24 @@ async function teDelete() {
   if (!state.editingTplId) return;
   const okDel = await confirmModal({ title: "刪除範本", message: "確定刪除此掃描範本?", okText: "刪除" });
   if (!okDel) return;
-  await api(`/api/templates/${state.editingTplId}`, "DELETE");
-  state.templates = await api("/api/templates");
-  const curTool = selectedTool(); if (curTool) populateTemplateDropdown(curTool);
-  showTplEmpty();
-  toast("已刪除", "ok");
+  try {
+    await api(`/api/templates/${state.editingTplId}`, "DELETE");
+    state.templates = await api("/api/templates");
+    const curTool = selectedTool(); if (curTool) populateTemplateDropdown(curTool);
+    showTplEmpty();
+    toast("已刪除", "ok");
+  } catch (e) { toast("刪除失敗:" + e.message, "err"); }
 }
 
 // ----- current project -----
 function loadCurrentProject() {
   const p = state.projects.find(x => x.id === state.projectId); if (!p) return;
-  $("#cpName").value = p.name; $("#cpNote").value = p.note || ""; $("#cpIp").value = p.restrict_ip || "";
+  $("#cpName").value = p.name; $("#cpNote").value = p.note || "";
 }
 async function saveCurrentProject() {
   if (state.projectId == null) return;
   try {
-    await api(`/api/projects/${state.projectId}`, "PATCH", { name: $("#cpName").value.trim(), note: $("#cpNote").value.trim(), restrict_ip: $("#cpIp").value.trim() });
+    await api(`/api/projects/${state.projectId}`, "PATCH", { name: $("#cpName").value.trim(), note: $("#cpNote").value.trim() });
     await loadProjects(); toast("已儲存本專案", "ok");
   } catch (e) { toast("儲存失敗:" + e.message, "err"); }
 }
@@ -1048,7 +2406,9 @@ function closeModals() {
   if (_confirmResolve) { resolveConfirm(false); return; }
   $("#modalBackdrop").classList.add("hidden");
   $$(".modal").forEach(m => m.classList.add("hidden"));
-  state.detailId = null;
+  // NOTE: do NOT touch state.detailId here -- it's the active detail TAB's scan id,
+  // managed by applyTab/loadDetailInto. Nuking it on Esc froze a running scan's live
+  // log + row highlight while you stayed on the detail tab.
 }
 
 // Reusable confirm dialog — every destructive/mutating action routes through
@@ -1168,6 +2528,8 @@ async function loadTemplates(applyLast) {
 
 // ===== init ===============================================================
 function init() {
+  restoreTabs(); renderComposeTabs(); applyTab(_activeTab());
+  window.addEventListener("beforeunload", saveTabs);
   $("#projectsBtn").onclick = () => showProjectsView(false);
   $("#projectsBackBtn").onclick = () => { if (state.projectId != null) showDashboard(); else toast("請先建立一個專案", "err"); };
   $("#openNewProjectBtn").onclick = openNewProject;
@@ -1178,15 +2540,20 @@ function init() {
   $("#launchBtn").onclick = launch;
   $("#refreshBtn").onclick = loadScans;
   $("#stopAllBtn").onclick = stopAll;
-  $("#treeExpandAll").onclick = treeExpandAll;
+  loadTreePrefs();
+  $("#treeExpandNodes").onclick = () => treeExpandAll(state.treeFullRecords);   // 展開: records included iff the toggle is on
   $("#treeCollapseAll").onclick = treeCollapseAll;
-  $("#statusFilter").onchange = loadScans;
+  const _tfp = $("#treeFullPath");
+  if (_tfp) { _tfp.checked = state.treeFullPath; _tfp.onchange = () => { state.treeFullPath = _tfp.checked; saveTreeFullPath(); renderTreeIfChanged(true); }; }
+  const _tfr = $("#treeFullRecords");
+  if (_tfr) { _tfr.checked = state.treeFullRecords; _tfr.onchange = () => { state.treeFullRecords = _tfr.checked; saveTreeFullRecords(); applyFullRecordsToggle(); }; }
   $$("[data-sel]").forEach(b => b.onclick = () => selectParams(b.dataset.sel));
   $$('input[name="tool"]').forEach(r => r.onchange = () => selectTool(r.value, { autoDefault: true }));
+  $$("#modeCard .seg-btn").forEach(b => b.onclick = () => setScanMode(b.dataset.mode));
   $("#optGrid").addEventListener("input", updateCmdPreview);      // live command preview
+  $("#optGrid").addEventListener("change", updateCmdPreview);     // selects / checkbox groups
   $("#optToggles").addEventListener("change", updateCmdPreview);
-  $("#applyTplBtn").onclick = applySelectedTemplate;
-  $("#templateSelect").onchange = applySelectedTemplate;
+  $("#optToggles").addEventListener("input", updateCmdPreview);   // danger-zone text fields live-update
   $("#editTplLink").onclick = () => showSettings("templates");
 
   $("#settingsBtn").onclick = () => showSettings("general");
@@ -1197,7 +2564,6 @@ function init() {
   $$("#ruleScopeTabs .subtab").forEach(t => t.onclick = () => setRuleScope(t.dataset.scope));
   $("#cpSave").onclick = saveCurrentProject;
 
-  $$('input[name="teTool"]').forEach(r => r.onchange = () => teSelectTool(r.value));
   $$("#tplToolTabs .subtab").forEach(t => t.onclick = () => setTplTool(t.dataset.tpltool));
   setupTplResizer();
   $("#teNewBtn").onclick = teNewTemplate;
@@ -1211,16 +2577,16 @@ function init() {
   setupResizer("#resizerLeft", "#scanSidebar", "left", "panelLeftW");
   setupResizer("#resizerRight", "#treePanel", "right", "panelRightW");
   syncPanels();
-  $("#sdDelete").onclick = () => { if (state.detailId != null) deleteScan(state.detailId); };
   $("#modalBackdrop").onclick = closeModals;
   $$("[data-close]").forEach(b => b.onclick = closeModals);
   document.addEventListener("keydown", e => { if (e.key === "Escape") closeModals(); });
 
-  loadProjects().then(ok => { if (ok) { showDashboard(); loadScans(); loadTemplates(true); } });
-  // IP: initial fetch + countdown clock, interval from settings
-  api("/api/settings").then(s => { state.settings = s; setIpSeconds(s.ip_refresh_seconds); }).catch(() => {});
+  loadProjects().then(ok => { if (ok) { showDashboard(); loadScans(); loadTemplates(true); } })
+    .catch(e => toast("載入失敗:" + (e && e.message || e) + " — 請確認後端已啟動,重新整理再試", "err"));
+  // settings: IP interval + configurable scan-refresh interval
+  api("/api/settings").then(s => { state.settings = s; setIpSeconds(s.ip_refresh_seconds); applyScanRefresh(); }).catch(() => {});
   doIpRefresh(); refreshHealth();
-  setInterval(tick, 1500);
+  applyScanRefresh();     // start polling now (re-applied with saved value once settings load)
   setInterval(ipTick, 1000);
   setInterval(refreshHealth, 15000);
 }
