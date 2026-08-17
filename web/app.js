@@ -2605,7 +2605,13 @@ function _stripAnsi(s) { return (s || "").replace(_ANSI_RE, ""); }
 // terminal-style palette (concrete hex so it survives both the DOM view and the PNG raster)
 const TERM_HEX = { info: "#4ec9b0", warning: "#e5c07b", error: "#e06c75", critical: "#ff6b6b",
   payload: "#c586c0", debug: "#7f848e", verdict: "#61afef", def: "#d4d4d4" };
-const HL_HEX = { hit: "#e5c07b", enum: "#4ec9b0", verdict: "#61afef", def: "#d4d4d4" };
+const HL_HEX = { hit: "#e5c07b", clean: "#6a9955", enum: "#4ec9b0", verdict: "#61afef", def: "#d4d4d4" };
+// key evidence lines BOTH engines print -- highlighted by PATTERN regardless of the
+// scan-level marker, so ghauri (whose clean verdict marker is Chinese, never in its
+// English log) still lights its own evidence instead of showing no highlight at all.
+const _HL_VULN_RE = /(\bis vulnerable\b|\bis injectable\b|appears to be '[^']*' injectable|identified the following injection|injection point on)/i;
+const _HL_CLEAN_RE = /(does not seem to be injectable|do not appear to be injectable|might not be injectable)/i;
+const _HL_ENUM_RE = /(^|[^A-Za-z])(Parameter|Type|Title|Payload):/;   // ghauri/sqlmap injection summary (case-sensitive: skip "GET parameter")
 function _termKey(line) {
   if (line.includes("【判定】")) return "verdict";
   const m = line.match(/\[(INFO|WARNING|ERROR|CRITICAL|PAYLOAD|DEBUG)\]/);
@@ -2629,8 +2635,10 @@ function _enumPats(scan) {
 function _hlKey(line, lows, enumPats) {
   if (line.includes("【判定】")) return "verdict";
   const low = line.toLowerCase();
-  if (lows.some(m => low.includes(m))) return "hit";
-  if (enumPats.length && enumPats.some(p => low.includes(p))) return "enum";
+  if (_HL_VULN_RE.test(line) || lows.some(m => low.includes(m))) return "hit";
+  if (_HL_CLEAN_RE.test(line)) return "clean";
+  if (_HL_ENUM_RE.test(line) || low.includes("the back-end dbms is") || low.includes("back-end dbms:")
+      || (enumPats.length && enumPats.some(p => low.includes(p)))) return "enum";
   return "def";
 }
 function _effectiveLogView() { return state.logView || ((state.settings && state.settings.default_log_view === "original") ? "original" : "highlighted"); }
@@ -2677,10 +2685,11 @@ function _renderDetailLog() {
     if (mode === "original") {   // terminal-style: colour by log level, no verdict highlighting
       return `<span style="color:${TERM_HEX[_termKey(line)]}">${e}</span>`;
     }
-    if (line.includes("【判定】")) return `<span class="log-verdict">${e}</span>`;
-    const low = line.toLowerCase();
-    if (lows.some(m => low.includes(m))) return `<mark class="log-hit">${e}</mark>`;
-    if (enumPats.length && enumPats.some(p => low.includes(p))) return `<mark class="log-enum">${e}</mark>`;
+    const k = _hlKey(line, lows, enumPats);
+    if (k === "verdict") return `<span class="log-verdict">${e}</span>`;
+    if (k === "hit") return `<mark class="log-hit">${e}</mark>`;
+    if (k === "clean") return `<mark class="log-clean">${e}</mark>`;
+    if (k === "enum") return `<mark class="log-enum">${e}</mark>`;
     return e;
   }).join("\n");
   if (atBottom) view.scrollTop = view.scrollHeight;

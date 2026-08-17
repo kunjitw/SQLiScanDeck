@@ -697,6 +697,7 @@ table tr:last-child td { border-bottom: none; }
 .vd-waf .vd-value { color: var(--warn); }
 .log-verdict { color: var(--accent); font-weight: 600; }
 .log-hit { background: var(--warn-soft); color: var(--warn); border-radius: 0; padding: 0 2px; }
+.log-clean { background: var(--ok-soft); color: var(--ok); border-radius: 0; padding: 0 2px; }   /* per-param "not injectable" verdict line */
 .log-enum { background: var(--accent-soft); color: var(--accent); border-radius: 0; padding: 0 2px; }   /* parsed enumeration value (banner / user / db / ...) */
 .log-view.log-terminal { background: #1e1e1e; color: #d4d4d4; }   /* 原始 view: fixed terminal palette needs a dark ground (light-theme readability) */
 /* raw-output view toggle header (高亮 / 原始 + 只顯示原始 + 匯出圖片) */
