@@ -10,7 +10,7 @@ Locations map onto sqlmap/ghauri places: GET, POST, JSON, COOKIE, HEADER, URI.
 """
 import json
 import re
-from urllib.parse import urlsplit, parse_qsl, urlunsplit
+from urllib.parse import urlsplit, parse_qsl, urlunsplit, unquote
 
 # Headers that are commonly worth offering as injectable points.
 INTERESTING_HEADERS = ("user-agent", "referer", "x-forwarded-for", "x-forwarded-host", "origin")
@@ -188,6 +188,23 @@ def parse_request(raw, force_ssl=False):
         return result
 
 
+def _multipart_filename(cd):
+    """Best-effort display filename from a Content-Disposition line: quoted filename,
+    RFC 5987 filename* (percent-decoded), or a bare token. Detection of file-ness is
+    separate (any filename/filename* presence) -- this is only for display."""
+    m = re.search(r'(?i)\bfilename\s*=\s*"([^"]*)"', cd)
+    if m:
+        return m.group(1)
+    m = re.search(r"(?i)\bfilename\*\s*=\s*[^']*''([^;\r\n]+)", cd)
+    if m:
+        try:
+            return unquote(m.group(1))
+        except Exception:
+            return m.group(1)
+    m = re.search(r'(?i)\bfilename\s*=\s*([^;\r\n]+)', cd)
+    return m.group(1).strip().strip('"') if m else ""
+
+
 def _multipart_boundary(content_type):
     m = re.search(r'boundary=(?:"([^"]+)"|([^";]+))', content_type or "", re.I)
     return (m.group(1) or m.group(2)).strip() if m else None
@@ -217,15 +234,22 @@ def _parse_multipart(body, content_type):
                 cd = hl
             elif low.startswith("content-type:"):
                 part_ct = hl.split(":", 1)[1].strip()
-        name_m = re.search(r'name="([^"]*)"', cd)
+        name_m = re.search(r'(?i)\bname\s*=\s*"([^"]*)"', cd)
         if not name_m or not name_m.group(1):
             continue
         name = name_m.group(1)
-        file_m = re.search(r'filename="([^"]*)"', cd)   # presence of filename => file field
-        if file_m is not None:
-            fn = file_m.group(1)
+        # File field? Robust, fail-toward-skip:
+        #  - a `filename=` OR `filename*=` attribute (RFC 5987 unicode), any case /
+        #    quoting / whitespace -- the canonical marker; OR
+        #  - a per-part Content-Type that isn't text/* or application/json (browsers
+        #    only attach a Content-Type to file parts; text fields normally have none).
+        has_fn = re.search(r'(?i)\bfilename\*?\s*=', cd) is not None
+        ct_low = part_ct.lower()
+        ct_file = bool(part_ct) and not ct_low.startswith("text/") and "application/json" not in ct_low
+        if has_fn or ct_file:
+            fn = _multipart_filename(cd)
             summary = "檔案上傳:{}{} · {} bytes".format(
-                fn or "(未選檔)", " · " + part_ct if part_ct else "", len(content))
+                fn or "(未命名/未選檔)", " · " + part_ct if part_ct else "", len(content))
             out.append({"name": name, "location": "FILE", "value": summary,
                         "is_file": True, "filename": fn, "part_ctype": part_ct})
         else:

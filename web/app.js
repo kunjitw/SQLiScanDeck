@@ -1362,22 +1362,29 @@ function renderParams() {
   const tb = $("#paramsTable tbody");
   if (!state.params.length) {
     tb.innerHTML = `<tr><td colspan="7" style="color:var(--fg-dim)">沒有偵測到參數。可在 URL 加 ?id=1 之類再試。</td></tr>`;
-    renderParamRegion($("#headerParams"), [], {}); renderParamRegion($("#skipParams"), [], {});
+    renderParamRegion($("#headerParams"), [], {}); renderParamRegion($("#fileParams"), [], {}); renderParamRegion($("#skipParams"), [], {});
     return;
   }
   const idxs = state.params.map((_, i) => i);
   const isHeader = i => state.params[i].location === "HEADER";
-  const main = idxs.filter(i => !state.params[i].filtered && !isHeader(i));
+  const isFile = i => state.params[i].location === "FILE";
+  const main = idxs.filter(i => !state.params[i].filtered && !isHeader(i) && !isFile(i));
   const headers = idxs.filter(isHeader);
-  const skipped = idxs.filter(i => state.params[i].filtered && !isHeader(i));
+  const files = idxs.filter(isFile);
+  const skipped = idxs.filter(i => state.params[i].filtered && !isHeader(i) && !isFile(i));
   // main table: the real test candidates (GET/POST/JSON/COOKIE, not auto-skipped)
   tb.innerHTML = main.length ? main.map(paramRowHtml).join("")
-    : `<tr><td colspan="7" style="color:var(--fg-dim)">主要參數都在下方分區(Header / 已略過)。</td></tr>`;
+    : `<tr><td colspan="7" style="color:var(--fg-dim)">主要參數都在下方分區(Header / 檔案 / 已略過)。</td></tr>`;
   wireParamRows(tb);
   // Header injection points — their OWN region (uncommon, default unchecked)
   renderParamRegion($("#headerParams"), headers, {
     title: "Header 位置參數(預設不勾)", hint: "較少見的注入點,需要才勾",
     collapsed: state.headerCollapsed, set: v => state.headerCollapsed = v,
+  });
+  // multipart FILE-upload fields — their OWN region, never SQLi-fuzzed
+  renderParamRegion($("#fileParams"), files, {
+    title: "檔案上傳欄位(不測 SQLi)", hint: "multipart 檔案欄位,已自動略過;檔案漏洞請另行測試",
+    collapsed: state.fileCollapsed, set: v => state.fileCollapsed = v,
   });
   // Rule-matched noise — its OWN region (default unchecked)
   renderParamRegion($("#skipParams"), skipped, {
