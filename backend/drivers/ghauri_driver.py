@@ -238,6 +238,8 @@ def run(ctx):
         # the selected params; a clean signal amid an error storm or without coverage
         # becomes 'inconclusive' (測不準); rc!=0 or no clean signal at all stays 'error'.
         status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text)
+        # baseline trustworthy? (see sqlmap_driver) -- gates downstream clean recording.
+        findings["reliability_ok"] = base.severe_reliability(log_text)[0] is None
         inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text)
                              if status == "inconclusive" else None)
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)

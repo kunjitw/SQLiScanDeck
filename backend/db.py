@@ -533,6 +533,7 @@ def _param_outcomes(row):
     vuln = {str(p).split(" (")[0].strip() for p in (res.get("parameters") or [])}
     per = res.get("per_param") or {}
     scan_vuln = bool(row.get("vulnerable"))
+    reliable = res.get("reliability_ok", True)   # False on a severe-reliability 測不準 run
     out = []
     for p in params:
         if not p.get("selected"):
@@ -546,6 +547,8 @@ def _param_outcomes(row):
         # NOT 無洞. The scan-level status is deliberately NOT used to infer per-param clean.
         if name in vuln or pv == "vulnerable":
             st = "vuln"
+        elif not reliable:
+            st = "unknown"                         # untrustworthy baseline -> 未測, never green
         elif pv == "tentative":
             st = "tentative"                       # unresolved tentative -> 疑似, never silently clean
         elif pv == "clean":

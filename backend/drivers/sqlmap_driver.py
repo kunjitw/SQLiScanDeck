@@ -215,6 +215,9 @@ def run(ctx):
         # becomes 'inconclusive' (測不準) -- never a groundless 無洞. rc!=0 or no clean
         # signal at all is still 'error'.
         status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text)
+        # baseline trustworthy? a severe-reliability run's per-param "clean" lines rest
+        # on the same rejected baseline, so downstream must NOT paint/record them clean.
+        findings["reliability_ok"] = base.severe_reliability(log_text)[0] is None
         inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text)
                              if status == "inconclusive" else None)
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)

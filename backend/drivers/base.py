@@ -234,9 +234,30 @@ def caveats(log_text):
 # sequence matcher, so they don't by themselves void the result.
 _SEVERE_CAVEAT_MARKERS = (
     ("responded with an http error code", "基準請求就收到 HTTP 錯誤碼,無法建立可靠的比較基準"),
-    ("http error codes detected during run", "掃描期間出現大量 HTTP 錯誤碼,回應無法可靠比較"),
     ("continuous problem with connection to the target", "與目標連線持續有問題,結果不可靠"),
 )
+
+# sqlmap prints "HTTP error codes detected during run:" whenever kb.httpErrorCodes
+# is non-empty -- i.e. after even ONE 4xx/5xx (a single 500 to a quote-containing
+# probe is common on perfectly clean targets). So this marker alone must NOT void a
+# clean verdict; only a STORM does. We sum the "<code> (...) - N times" counts and
+# require a threshold before treating it as severe.
+_ERROR_STORM_MARKER = "http error codes detected during run"
+_ERROR_STORM_MIN = 20                       # total 4xx/5xx across the run to count as a storm
+_ERROR_COUNT_RE = re.compile(r"-\s*(\d+)\s*times?", re.I)
+
+
+def _error_storm_note(log_text):
+    """Human note if the run had a STORM of HTTP errors (many, not just one), else None."""
+    text = log_text or ""
+    i = text.lower().find(_ERROR_STORM_MARKER)
+    if i == -1:
+        return None
+    block = text[i:i + 600]                 # the code/count lines follow the marker
+    total = sum(int(m.group(1)) for m in _ERROR_COUNT_RE.finditer(block))
+    if total >= _ERROR_STORM_MIN:
+        return "掃描期間出現大量 HTTP 錯誤碼(共 {} 次),回應無法可靠比較".format(total)
+    return None
 
 
 def severe_reliability(log_text):
@@ -246,6 +267,9 @@ def severe_reliability(log_text):
     for marker, note in _SEVERE_CAVEAT_MARKERS:
         if marker in low:
             return marker, note
+    storm = _error_storm_note(log_text)
+    if storm:
+        return _ERROR_STORM_MARKER, storm
     return None, None
 
 

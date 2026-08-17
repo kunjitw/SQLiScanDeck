@@ -142,6 +142,10 @@ class ScanContext:
     def _record_param_history(self, vulnerable, findings):
         summary_vuln = _vuln_param_names(findings) if vulnerable else set()
         explicit = (findings or {}).get("per_param") or {}   # {name: vulnerable|clean}
+        # a severe-reliability run (測不準) has an untrustworthy baseline; its per-param
+        # "clean" lines rest on that same baseline, so we record ONLY confirmed vulns and
+        # leave everything else 未測 (no false clean into the dedup history).
+        reliable = (findings or {}).get("reliability_ok", True)
         recorded = []
         for p in self.params:
             name = p["name"]
@@ -169,6 +173,8 @@ class ScanContext:
             # non-vuln completion) is deliberately gone.
             if name in summary_vuln or explicit.get(name) == "vulnerable":
                 status, is_vuln = "vulnerable", True
+            elif not reliable:
+                continue                            # untrustworthy baseline -> no clean, stays 未測
             elif explicit.get(name) == "clean":
                 status, is_vuln = "clean", False
             elif explicit.get(name) == "tentative":

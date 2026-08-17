@@ -21,7 +21,7 @@ import re
 import os
 import json
 import base64
-import gzip
+import zlib
 from urllib.parse import unquote_plus
 
 
@@ -181,10 +181,16 @@ def _t_gunzip(v):
     if not isinstance(v, (bytes, bytearray)):
         return None
     try:
-        out = gzip.decompress(bytes(v))
+        # bounded, incremental: cap OUTPUT at _MAX_DECODE so a zip bomb can never
+        # materialize gigabytes before a post-hoc size check (which gzip.decompress
+        # would). 16 + MAX_WBITS = gzip-wrapped stream.
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        out = d.decompress(bytes(v), _MAX_DECODE)
+        if d.unconsumed_tail:        # more than _MAX_DECODE would decompress -> reject
+            return None
+        return out
     except Exception:
         return None
-    return out if len(out) <= _MAX_DECODE else None
 
 
 def _t_json(v):
@@ -234,6 +240,8 @@ def _apply_transforms(value, transforms):
     data = value
     for t in transforms[:8]:              # cap chain depth
         if data is None:
+            return None
+        if not isinstance(t, str):        # a non-string token -> fail safe, never crash
             return None
         m = re.match(r"^split-dot\[(\d+)\]$", t)
         if m:
@@ -296,17 +304,22 @@ def _match_data(mode, pattern, data):
 
 
 def _rule_matches(param, rule):
-    """Core matcher shared by filter + advise: location scope -> transform -> match."""
-    loc = (rule.get("location") or "").strip().upper()
-    if loc and loc != "ANY" and loc != (param.get("location") or "").upper():
+    """Core matcher shared by filter + advise: location scope -> transform -> match.
+    Fully fail-safe: any error evaluating ONE rule yields no-match and never
+    propagates, so a single malformed rule can't 500 the whole /parse."""
+    try:
+        loc = (rule.get("location") or "").strip().upper()
+        if loc and loc != "ANY" and loc != (param.get("location") or "").upper():
+            return False
+        kind = rule.get("kind", "value")
+        base = param.get("name", "") if kind == "name" else param.get("value", "")
+        transforms = _parse_transform(rule.get("transform"))
+        data = _apply_transforms(base, transforms) if transforms else base
+        if transforms and data is None:
+            return False
+        return _match_data(rule.get("mode", "contains"), rule.get("pattern", ""), data)
+    except Exception:
         return False
-    kind = rule.get("kind", "value")
-    base = param.get("name", "") if kind == "name" else param.get("value", "")
-    transforms = _parse_transform(rule.get("transform"))
-    data = _apply_transforms(base, transforms) if transforms else base
-    if transforms and data is None:
-        return False
-    return _match_data(rule.get("mode", "contains"), rule.get("pattern", ""), data)
 
 
 def evaluate(param, rules):
@@ -390,6 +403,9 @@ def load_advise_catalog():
             data = json.load(f)
         if isinstance(data, dict):
             data = data.get("rules") or []
-        return [r for r in data if isinstance(r, dict) and r.get("pattern")]
+        # require the fields the seed dereferences (kind/mode/pattern) so a hand-edited
+        # entry missing one is SKIPPED, not crash-at-startup when it reaches the seeder.
+        return [r for r in data if isinstance(r, dict)
+                and r.get("pattern") and r.get("kind") and r.get("mode")]
     except Exception:
         return []

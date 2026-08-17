@@ -1338,7 +1338,7 @@ function renderParamRegion(box, idxList, cfg) {
 function renderParams() {
   const tb = $("#paramsTable tbody");
   if (!state.params.length) {
-    tb.innerHTML = `<tr><td colspan="6" style="color:var(--fg-dim)">沒有偵測到參數。可在 URL 加 ?id=1 之類再試。</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="7" style="color:var(--fg-dim)">沒有偵測到參數。可在 URL 加 ?id=1 之類再試。</td></tr>`;
     renderParamRegion($("#headerParams"), [], {}); renderParamRegion($("#skipParams"), [], {});
     return;
   }
@@ -1349,7 +1349,7 @@ function renderParams() {
   const skipped = idxs.filter(i => state.params[i].filtered && !isHeader(i));
   // main table: the real test candidates (GET/POST/JSON/COOKIE, not auto-skipped)
   tb.innerHTML = main.length ? main.map(paramRowHtml).join("")
-    : `<tr><td colspan="6" style="color:var(--fg-dim)">主要參數都在下方分區(Header / 已略過)。</td></tr>`;
+    : `<tr><td colspan="7" style="color:var(--fg-dim)">主要參數都在下方分區(Header / 已略過)。</td></tr>`;
   wireParamRows(tb);
   // Header injection points — their OWN region (uncommon, default unchecked)
   renderParamRegion($("#headerParams"), headers, {
@@ -2350,6 +2350,7 @@ function _paramOutcome(p, f, scanVuln, scanDone) {
   const pp = (f && f.per_param) || {};
   const vulnNames = (f && f.parameters) || [];
   if (vulnNames.indexOf(p.name) >= 0 || pp[p.name] === "vulnerable") return { label: "有漏洞", cls: "st-vuln" };
+  if (f && f.reliability_ok === false) return { label: "未測", cls: "st-untested" };  // 測不準:baseline 不可信,per-param clean 不採信
   if (pp[p.name] === "clean") return { label: "無洞", cls: "st-clean" };            // tool said clean for THIS param
   if (pp[p.name] === "tentative") return { label: "疑似", cls: "st-tent" };          // tool's tentative, unconfirmed
   // No per-param evidence NAMED this param -> 未測, never a groundless 無洞. Covers a
