@@ -1,0 +1,215 @@
+[
+  {
+    "_group": "session/framework cookies -> backend language & framework",
+    "kind": "name", "mode": "regex", "pattern": "^PHPSESSID$", "location": "COOKIE",
+    "reveals": "後端語言:PHP", "category": "language", "confidence": "high",
+    "note": "PHP 預設 session cookie。可用 session.name 改名;貼上的請求裡此值可被使用者竄改,視為強但可偽造。缺少不代表非 PHP。",
+    "source": "https://www.php.net/manual/en/session.configuration.php"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^ASPSESSIONID[A-Z]{8}$", "location": "COOKIE",
+    "reveals": "後端:Classic ASP(舊版 IIS / VBScript)", "category": "language", "confidence": "high",
+    "note": "Classic ASP session cookie,8 個隨機大寫字母隨 app pool 變。強烈的舊 Windows 技術堆疊訊號。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^ASP\\.NET_SessionId$", "location": "COOKIE",
+    "reveals": "後端:ASP.NET(.NET Framework)", "category": "framework", "confidence": "high",
+    "note": "用了伺服器端 Session 才會出現。可用 web.config 改名。與 ASP.NET Core(.AspNetCore.*)區分。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^\\.AspNetCore\\.", "location": "COOKIE",
+    "reveals": "後端:ASP.NET Core(Kestrel/IIS)", "category": "framework", "confidence": "high",
+    "note": "ASP.NET Core 中介軟體發的 cookie(.Identity.Application=登入、.Antiforgery.*=CSRF、.Session=session)。前綴預設、少改名。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^\\.(ASPXAUTH|ASPXFORMSAUTH)$", "location": "COOKIE",
+    "reveals": "後端:ASP.NET Forms Authentication(.NET Framework)", "category": "auth", "confidence": "high",
+    "note": "machineKey 保護的 Forms 驗證票證。若 machineKey 洩漏/為預設值,可偽造/解密,並可能通往 ViewState/LosFormatter 反序列化(ysoserial.net)。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^JSESSIONID$", "location": "COOKIE",
+    "reveals": "後端語言:Java(Servlet 容器)", "category": "language", "confidence": "high",
+    "note": "Java Servlet 規範的 session cookie。確認 Java,但不指定容器(Tomcat/Jetty/JBoss…要靠其他訊號)。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(CFID|CFTOKEN|CFGLOBALS|CFAUTHORIZATION_)", "location": "COOKIE",
+    "reveals": "後端:Adobe ColdFusion / Lucee(CFML)", "category": "language", "confidence": "high",
+    "note": "ColdFusion client/session 變數。強 CFML 訊號 -> 查 CFML 反序列化 / admin(CVE-2023-26360 等)。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^laravel_session$", "location": "COOKIE",
+    "reveals": "框架:Laravel(PHP)", "category": "framework", "confidence": "high",
+    "note": "Laravel 預設 session cookie(名稱為 slugified APP_NAME,預設 laravel_session)。常搭 _token 參數與 remember_web_* cookie。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^remember_web_[0-9a-f]{40}$", "location": "COOKIE",
+    "reveals": "框架:Laravel(remember-me)", "category": "auth", "confidence": "high",
+    "note": "Laravel remember-me cookie,40 hex 後綴是 guard 名的 sha1,比 laravel_session 更難巧合誤判。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^ci_session$", "location": "COOKIE",
+    "reveals": "框架:CodeIgniter(PHP)", "category": "framework", "confidence": "high",
+    "note": "CodeIgniter 預設 session cookie。可改名但多為預設。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^connect\\.sid$", "location": "COOKIE",
+    "reveals": "後端:Node.js(Express / Connect)", "category": "framework", "confidence": "high",
+    "note": "express-session/Connect 預設 cookie,值常以 s: 開頭(已簽章)。可改名。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^koa\\.sess", "location": "COOKIE",
+    "reveals": "後端:Node.js(Koa)", "category": "framework", "confidence": "high",
+    "note": "koa-session 預設 cookie(koa.sess + koa.sess.sig HMAC)。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^csrftoken$", "location": "COOKIE",
+    "reveals": "框架:Django(Python)", "category": "framework", "confidence": "high",
+    "note": "Django CSRF cookie。搭配表單參數 csrfmiddlewaretoken 一起看更確定。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^_[A-Za-z0-9]+_session$", "location": "COOKIE",
+    "reveals": "框架:Ruby on Rails", "category": "framework", "confidence": "medium",
+    "note": "Rails cookie-store session(_<app>_session)。值為 base64 payload--HMAC。secret_key_base 洩漏可解/偽造。"
+  },
+  {
+    "_group": "CDN / WAF / LB infra cookies",
+    "kind": "name", "mode": "regex", "pattern": "^(__cf_bm|cf_clearance|__cfduid|__cflb)$", "location": "COOKIE",
+    "reveals": "CDN/WAF:Cloudflare", "category": "waf", "confidence": "high",
+    "note": "Cloudflare 邊緣加的 cookie。表示前面有 Cloudflare -> 影響 tamper 策略,且真實 origin 被遮住。",
+    "source": "https://developers.cloudflare.com/fundamentals/reference/policies-compliances/cloudflare-cookies/"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(incap_ses_|visid_incap_|nlbi_)", "location": "COOKIE",
+    "reveals": "WAF:Imperva Incapsula", "category": "waf", "confidence": "high",
+    "note": "Imperva/Incapsula 邊緣 cookie。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(_abck|bm_sz|ak_bmsc|bm_mi|bm_sv)$", "location": "COOKIE",
+    "reveals": "WAF:Akamai(Bot Manager)", "category": "waf", "confidence": "high",
+    "note": "Akamai 邊緣/Bot Manager cookie。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(AWSALB|AWSALBCORS)$", "location": "COOKIE",
+    "reveals": "負載平衡:AWS ALB", "category": "lb", "confidence": "high",
+    "note": "AWS Application Load Balancer sticky cookie。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^ARRAffinity", "location": "COOKIE",
+    "reveals": "負載平衡:Azure App Service(ARR)", "category": "lb", "confidence": "high",
+    "note": "Azure App Service / IIS ARR 親和性 cookie。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^BIGipServer", "location": "COOKIE",
+    "reveals": "負載平衡:F5 BIG-IP(可能洩漏內網 IP:port)", "category": "info-leak", "confidence": "high",
+    "note": "F5 BIG-IP 池成員 cookie。值常可解碼出後端伺服器的內網 IP:port(把值反編碼即得),是可利用的資訊洩漏。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^datadome$", "location": "COOKIE",
+    "reveals": "WAF:DataDome", "category": "waf", "confidence": "high",
+    "note": "DataDome 反爬/WAF cookie。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(_px|_pxvid|_pxhd|pxcts)$", "location": "COOKIE",
+    "reveals": "WAF:PerimeterX / HUMAN", "category": "waf", "confidence": "high",
+    "note": "PerimeterX(HUMAN)Bot Defender cookie。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(wordpress_|wp-settings-|wordpress_logged_in_)", "location": "COOKIE",
+    "reveals": "CMS:WordPress(PHP)", "category": "cms", "confidence": "high",
+    "note": "WordPress cookie。隱含 PHP + 通常 MySQL。"
+  },
+  {
+    "_group": "framework-generated PARAM names (hard to fake -- the framework emits them)",
+    "kind": "name", "mode": "regex", "pattern": "^__VIEWSTATE$",
+    "reveals": "框架:ASP.NET WebForms", "category": "framework", "confidence": "high",
+    "note": "WebForms 頁面狀態。若 ViewState MAC 關/machineKey 洩漏 -> ViewState 反序列化 RCE。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^__RequestVerificationToken$",
+    "reveals": "框架:ASP.NET MVC / Core(anti-forgery)", "category": "framework", "confidence": "high",
+    "note": "ASP.NET 反 CSRF 表單欄位。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^csrfmiddlewaretoken$",
+    "reveals": "框架:Django(Python)", "category": "framework", "confidence": "high",
+    "note": "Django CSRF 表單欄位,框架自動產生,難偽造。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^authenticity_token$",
+    "reveals": "框架:Ruby on Rails", "category": "framework", "confidence": "high",
+    "note": "Rails CSRF 欄位,框架自動產生。常搭 utf8=✓。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(form_build_id|form_id|form_token)$",
+    "reveals": "CMS:Drupal(PHP)", "category": "cms", "confidence": "high",
+    "note": "Drupal 表單 API 欄位。隱含 PHP。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^XDEBUG_SESSION", "location": "COOKIE",
+    "reveals": "PHP Xdebug 已啟用(除錯/原始碼洩漏風險)", "category": "info-leak", "confidence": "high",
+    "note": "Xdebug 除錯 session。若生產環境開著,可能被觸發遠端除錯/原始碼洩漏。"
+  },
+  {
+    "_group": "path extension -> backend language",
+    "kind": "value", "mode": "regex", "pattern": "\\.php[0-9]?($|[?/])", "location": "PATH",
+    "reveals": "後端語言:PHP", "category": "language", "confidence": "high",
+    "note": "路徑副檔名 .php。URL rewrite 可能隱藏,故有更好、無不代表沒有。"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "\\.(aspx|asp|ashx|asmx|axd|svc)($|[?/])", "location": "PATH",
+    "reveals": "後端:ASP.NET(IIS)", "category": "framework", "confidence": "high",
+    "note": ".axd(Telerik/ScriptResource/WebResource)、.asmx/.svc(Web Service)常對應已知 CVE,值得查版本。"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "\\.(jsp|jspx|do|action|jsf|seam)($|[?/])", "location": "PATH",
+    "reveals": "後端語言:Java", "category": "language", "confidence": "high",
+    "note": ".action=Struts2(CVE 多)、.jsf/.seam=JSF ViewState 反序列化面。"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "\\.cfm($|[?/])", "location": "PATH",
+    "reveals": "後端語言:ColdFusion(CFML)", "category": "language", "confidence": "high",
+    "note": ".cfm/.cfc 路徑。"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "\\.(pl|cgi)($|[?/])", "location": "PATH",
+    "reveals": "後端:Perl / CGI", "category": "language", "confidence": "medium",
+    "note": "傳統 CGI/Perl。"
+  },
+  {
+    "_group": "path segment -> CMS / framework",
+    "kind": "value", "mode": "regex", "pattern": "/wp-(admin|content|includes|json|login)", "location": "PATH",
+    "reveals": "CMS:WordPress(PHP)", "category": "cms", "confidence": "high",
+    "note": "WordPress 路徑。隱含 PHP + MySQL。"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "/(typo3|umbraco|sites/(default|all)|bitrix)/", "location": "PATH",
+    "reveals": "CMS:TYPO3 / Umbraco / Drupal / Bitrix", "category": "cms", "confidence": "high",
+    "note": "各 CMS 的特徵路徑段(Umbraco=.NET;TYPO3/Drupal=PHP)。"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "/_next/", "location": "PATH",
+    "reveals": "框架:Next.js(React SSR / Node)", "category": "framework", "confidence": "high",
+    "note": "Next.js 靜態資產路徑。"
+  },
+  {
+    "_group": "request headers -> framework / protocol / auth",
+    "kind": "name", "mode": "regex", "pattern": "^SOAPAction$", "location": "HEADER",
+    "reveals": "協定:SOAP Web Service", "category": "framework", "confidence": "high",
+    "note": "有 SOAPAction 標頭 = SOAP 端點;測 XXE / WSDL 列舉。"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^X-(Inertia|Livewire)", "location": "HEADER",
+    "reveals": "框架:Laravel(Inertia / Livewire)", "category": "framework", "confidence": "high",
+    "note": "Laravel 前端整合的請求標頭。"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^(NTLM|Negotiate) ", "location": "HEADER",
+    "reveals": "驗證:Windows / Active Directory(NTLM / Kerberos)", "category": "auth", "confidence": "high",
+    "note": "Authorization: NTLM/Negotiate。NTLM Type-2 訊息 base64 解碼可洩漏內部 AD 網域、主機名、OS build。"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^Bearer eyJ", "location": "HEADER",
+    "reveals": "此請求帶了 JWT(客戶端)", "category": "auth", "confidence": "medium",
+    "note": "請求端資訊,非伺服器指紋:代表這個請求用 JWT 驗證。可去測 JWT(alg:none/弱金鑰/kid)。"
+  }
+]

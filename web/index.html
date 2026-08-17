@@ -69,6 +69,7 @@
     <section class="panel hidden" id="resultCard">
       <div class="section-head"><span class="bar"></span>2 · 解析結果</div>
       <div id="parseSummary" class="kv-grid"></div>
+      <div id="reconPanel" class="recon-panel"></div>
       <div class="subhead">
         偵測到的參數
         <span class="tiny-actions">
@@ -252,7 +253,7 @@
         <button class="subtab" data-scope="project">本專案規則</button>
       </div>
       <div class="rules-add">
-        <select id="rPurpose"><option value="filter">過濾</option><option value="advise">建議</option></select>
+        <select id="rPurpose"><option value="filter">過濾</option><option value="advise">建議</option><option value="recon">情報</option></select>
         <select id="rKind"><option value="name">依名稱</option><option value="value">依值</option></select>
         <select id="rMode">
           <option value="prefix">開頭是</option><option value="contains">包含</option>
@@ -264,7 +265,7 @@
         </select>
         <input id="rLocation" placeholder="位置(可空=任意):COOKIE/GET/POST…" size="14">
         <input id="rPattern" placeholder="樣式,例:_ga">
-        <input id="rVulnClass" placeholder="建議類別(建議規則用)" size="16">
+        <input id="rVulnClass" placeholder="結論(建議類別 / 情報揭露)" size="18">
         <input id="rNote" placeholder="備註(可空)">
         <button class="btn sm" id="rAdd">新增到全域</button>
       </div>

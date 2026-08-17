@@ -61,8 +61,10 @@ def init_db():
                 transform TEXT DEFAULT '',     -- JSON list of decoders applied before match, e.g. ["base64decode"]
                 vuln_class TEXT DEFAULT '',    -- advise: candidate test class
                 tool TEXT DEFAULT '',          -- advise: recommended tool/technique
-                confidence TEXT DEFAULT '',    -- advise: high|medium|low
-                source TEXT DEFAULT '',        -- advise: authoritative reference URL
+                confidence TEXT DEFAULT '',    -- advise/recon: high|medium|low
+                source TEXT DEFAULT '',        -- advise/recon: authoritative reference URL
+                reveals TEXT DEFAULT '',       -- recon: what the signal reveals (e.g. backend=PHP)
+                category TEXT DEFAULT '',      -- recon: language|framework|server|waf|cdn|cms|...
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
@@ -165,6 +167,8 @@ def init_db():
             ("tool", "TEXT DEFAULT ''"),
             ("confidence", "TEXT DEFAULT ''"),
             ("source", "TEXT DEFAULT ''"),
+            ("reveals", "TEXT DEFAULT ''"),
+            ("category", "TEXT DEFAULT ''"),
         ):
             try:
                 conn.execute("ALTER TABLE filter_rules ADD COLUMN {} {}".format(_col, _decl))
@@ -184,24 +188,29 @@ def _seed_default_rules():
     rules and user toggles on existing defaults are left untouched."""
     now = _now()
     defaults = ([dict(r, purpose="filter") for r in filters_mod.DEFAULT_RULES]
-                + [dict(r, purpose="advise") for r in filters_mod.load_advise_catalog()])
+                + [dict(r, purpose="advise") for r in filters_mod.load_advise_catalog()]
+                + [dict(r, purpose="recon") for r in filters_mod.load_recon_catalog()])
     for r in defaults:
         loc = r.get("location", "") or ""
+        # dedup on the full conclusion (vuln_class for advise, reveals for recon) so
+        # distinct rules sharing a pattern still both seed.
         exists = _conn.execute(
             "SELECT 1 FROM filter_rules WHERE project_id IS NULL AND purpose=? "
             "AND kind=? AND mode=? AND pattern=? AND IFNULL(location,'')=? "
-            "AND IFNULL(vuln_class,'')=?",
-            (r["purpose"], r["kind"], r["mode"], r["pattern"], loc, r.get("vuln_class", "") or ""),
+            "AND IFNULL(vuln_class,'')=? AND IFNULL(reveals,'')=?",
+            (r["purpose"], r["kind"], r["mode"], r["pattern"], loc,
+             r.get("vuln_class", "") or "", r.get("reveals", "") or ""),
         ).fetchone()
         if not exists:
             _conn.execute(
                 "INSERT INTO filter_rules(project_id,kind,mode,pattern,note,enabled,"
-                "purpose,location,transform,vuln_class,tool,confidence,source,created_at)"
-                " VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "purpose,location,transform,vuln_class,tool,confidence,source,reveals,category,created_at)"
+                " VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (r["kind"], r["mode"], r["pattern"], r.get("note", ""),
                  1 if r.get("enabled", True) else 0, r["purpose"], loc,
                  _dump_transform(r.get("transform")), r.get("vuln_class", ""),
-                 r.get("tool", ""), r.get("confidence", ""), r.get("source", ""), now),
+                 r.get("tool", ""), r.get("confidence", ""), r.get("source", ""),
+                 r.get("reveals", ""), r.get("category", ""), now),
             )
     _conn.commit()
 
@@ -435,15 +444,16 @@ def _dump_transform(t):
 
 def create_rule(kind, mode, pattern, note="", project_id=None, enabled=True,
                 purpose="filter", location="", transform="", vuln_class="",
-                tool="", confidence="", source=""):
+                tool="", confidence="", source="", reveals="", category=""):
     with _lock:
         cur = _conn.execute(
             "INSERT INTO filter_rules(project_id,kind,mode,pattern,note,enabled,"
-            "purpose,location,transform,vuln_class,tool,confidence,source,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "purpose,location,transform,vuln_class,tool,confidence,source,reveals,category,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (project_id, kind, mode, pattern, note, 1 if enabled else 0,
              purpose or "filter", location or "", _dump_transform(transform),
-             vuln_class or "", tool or "", confidence or "", source or "", _now()),
+             vuln_class or "", tool or "", confidence or "", source or "",
+             reveals or "", category or "", _now()),
         )
         _conn.commit()
         return _row(_conn.execute("SELECT * FROM filter_rules WHERE id=?",
@@ -452,7 +462,8 @@ def create_rule(kind, mode, pattern, note="", project_id=None, enabled=True,
 
 def update_rule(rule_id, **fields):
     allowed = {"kind", "mode", "pattern", "note", "enabled", "purpose",
-               "location", "transform", "vuln_class", "tool", "confidence", "source"}
+               "location", "transform", "vuln_class", "tool", "confidence", "source",
+               "reveals", "category"}
     if "transform" in fields:
         fields["transform"] = _dump_transform(fields["transform"])
     sets = {k: (1 if k == "enabled" and v else 0 if k == "enabled" else v)

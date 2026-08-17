@@ -597,6 +597,23 @@ table tr:last-child td { border-bottom: none; }
 .advchip.conf-high { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .advchip.conf-medium { color: var(--fg-soft); border-color: var(--border-strong); }
 .advchip.conf-low { opacity: 0.6; }
+/* target intel (recon): backend/framework/CDN inferred from the request alone */
+.recon-panel { margin-top: 0.5rem; display: grid; gap: 0.15rem; }
+.recon-panel:empty { display: none; }
+.recon-head { font-size: 0.7rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.2rem; }
+.recon-hint { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--fg-dim); font-size: 0.64rem; }
+.recon-row { display: grid; grid-template-columns: 3.4rem minmax(0, 1fr) 3.2rem minmax(0, 9rem); align-items: baseline; gap: 0.5rem; padding: 0.18rem 0.4rem; border-left: 2px solid var(--border-strong); background: var(--code-bg); font-size: 0.76rem; }
+.recon-row.leak { border-left-color: var(--danger); }
+.recon-cat { font-size: 0.62rem; color: var(--fg-dim); white-space: nowrap; }
+.recon-reveal { color: var(--fg); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recon-row.leak .recon-reveal { color: var(--danger); }
+.recon-conf { font-size: 0.58rem; font-weight: 700; text-align: center; text-transform: uppercase; }
+.recon-conf.conf-high { color: var(--accent); }
+.recon-conf.conf-medium { color: var(--fg-soft); }
+.recon-conf.conf-low { color: var(--fg-dim); }
+.recon-ev { font-family: var(--font-mono); font-size: 0.64rem; color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge.recon { background: var(--accent-soft); color: var(--accent); }
+.rules-table .dim { color: var(--fg-dim); }
 .scan-row-top { display: flex; align-items: center; gap: 0.4rem; }
 .scan-tool { font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); font-weight: 600; flex-shrink: 0; }
 .scan-id { margin-left: auto; font-family: var(--font-mono); font-size: 0.68rem; color: var(--fg-dim); flex-shrink: 0; }

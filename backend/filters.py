@@ -409,3 +409,63 @@ def load_advise_catalog():
                 and r.get("pattern") and r.get("kind") and r.get("mode")]
     except Exception:
         return []
+
+
+_RECON_CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "recon_catalog.json")
+
+
+def load_recon_catalog():
+    """Built-in 'recon' rules (request signature -> target intel: backend language,
+    framework, CDN/WAF, CMS). Data, not code; never raises."""
+    try:
+        with open(_RECON_CATALOG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data = data.get("rules") or []
+        return [r for r in data if isinstance(r, dict)
+                and r.get("pattern") and r.get("kind") and r.get("mode")]
+    except Exception:
+        return []
+
+
+_CONF_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def recon(params, rules):
+    """Aggregate recon-rule hits over the request's params (cookies / param names /
+    headers / a synthetic PATH pseudo-param) into per-conclusion intel:
+    [{category, reveals, confidence, note, source, evidence:[names]}], deduped by
+    `reveals`. Confidence is the strongest single hit, bumped to 'high' when >= 2
+    distinct signals corroborate the same reveal (wafw00f-style). Purely informational
+    -- request-only, so it characterizes the submitted request, never proves the server."""
+    agg = {}
+    for rule in rules:
+        if not rule.get("enabled", True) or rule.get("purpose") != "recon":
+            continue
+        if not rule.get("pattern"):
+            continue
+        reveals = rule.get("reveals", "") or rule.get("note", "")
+        for p in params:
+            if not _rule_matches(p, rule):
+                continue
+            a = agg.setdefault(reveals, {
+                "reveals": reveals, "category": rule.get("category", ""),
+                "note": rule.get("note", ""), "source": rule.get("source", ""),
+                "confs": [], "evidence": [],
+            })
+            a["confs"].append(rule.get("confidence", "low") or "low")
+            ev = p.get("name", "") or p.get("location", "")
+            if ev and ev not in a["evidence"]:
+                a["evidence"].append(ev)
+            break                          # one contribution per rule
+    out = []
+    for a in agg.values():
+        best = min(a["confs"], key=lambda c: _CONF_RANK.get(c, 2)) if a["confs"] else "low"
+        if len(a["evidence"]) >= 2 and best != "high":
+            best = "high"                  # corroborated by independent signals
+        out.append({"category": a["category"], "reveals": a["reveals"],
+                    "confidence": best, "note": a["note"], "source": a["source"],
+                    "evidence": a["evidence"]})
+    out.sort(key=lambda x: (x["category"], _CONF_RANK.get(x["confidence"], 2)))
+    return out

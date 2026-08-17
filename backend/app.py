@@ -56,6 +56,16 @@ def _annotate_params(parsed, project_id):
     # computed from the SAME rules (purpose=advise); never changes selection.
     filters_mod.apply_advice(annotated, rules)
 
+    # target intel (recon): fingerprint backend / framework / CDN / WAF from the
+    # REQUEST alone. Matched over the params + a synthetic PATH pseudo-param so
+    # path-extension rules (.php/.aspx/...) can fire. Request-only, so it only
+    # characterizes the submitted request, never proves the server.
+    path = parsed.get("path") or parsed.get("url") or ""
+    recon_targets = list(annotated)
+    if path:
+        recon_targets.append({"name": path, "location": "PATH", "value": path})
+    recon = filters_mod.recon(recon_targets, rules)
+
     signature, sig_endpoint, endpoint = manager.prepare_target(parsed)
     prior = {}
     for ph in db.param_history(project_id, sig_endpoint):
@@ -70,7 +80,7 @@ def _annotate_params(parsed, project_id):
             p["prior_status"] = None
             p["prior_vulnerable"] = False
             p["prior_test_count"] = 0
-    return annotated, signature, sig_endpoint, endpoint
+    return annotated, signature, sig_endpoint, endpoint, recon
 
 
 # --------------------------------------------------------------------------
@@ -173,8 +183,8 @@ def create_rule(payload: dict = Body(...)):
     if mode not in ("equals", "iequals", "prefix", "contains", "regex",
                     "magic", "json-key", "len-mod"):
         raise HTTPException(400, "不支援的 mode")
-    if (payload.get("purpose") or "filter") not in ("filter", "advise"):
-        raise HTTPException(400, "purpose 必須是 filter 或 advise")
+    if (payload.get("purpose") or "filter") not in ("filter", "advise", "recon"):
+        raise HTTPException(400, "purpose 必須是 filter / advise / recon")
     if not pattern:
         raise HTTPException(400, "pattern 不可為空")
     return db.create_rule(
@@ -187,6 +197,8 @@ def create_rule(payload: dict = Body(...)):
         tool=payload.get("tool", ""),
         confidence=payload.get("confidence", ""),
         source=payload.get("source", ""),
+        reveals=payload.get("reveals", ""),
+        category=payload.get("category", ""),
     )
 
 
@@ -245,7 +257,7 @@ def parse(payload: dict = Body(...)):
     force_ssl = bool(payload.get("force_ssl", False))
     project_id = payload.get("project_id")
     parsed = request_parser.parse_request(raw, force_ssl=force_ssl)
-    annotated, signature, sig_endpoint, endpoint = _annotate_params(parsed, project_id)
+    annotated, signature, sig_endpoint, endpoint, recon = _annotate_params(parsed, project_id)
     parsed["params"] = annotated
     history = manager.history_for(project_id, signature, sig_endpoint)
     return {
@@ -254,6 +266,7 @@ def parse(payload: dict = Body(...)):
         "sig_endpoint": sig_endpoint,
         "endpoint": endpoint,
         "history": history,
+        "recon": recon,
     }
 
 

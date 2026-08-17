@@ -1204,6 +1204,29 @@ function renderParseSummary(r) {
   }).join("") +
     `<div class="kv wide"><b>URL</b><span class="mono-val">${esc(p.url)}</span></div>` +
     `<div class="hint-line">送給工具的請求會用你貼上的<b>原始請求</b>(僅換行正規化),解析只用來挑參數與去重。</div>`;
+  renderReconPanel(r.recon);
+}
+// "目標情報": backend/framework/CDN/WAF inferred from the REQUEST alone. Heuristic +
+// request-only, so it characterizes the submitted request, never proves the server.
+const _RECON_CAT = { language: "語言", framework: "框架", server: "伺服器", waf: "WAF/防護",
+  cdn: "CDN", lb: "負載平衡", cms: "CMS", auth: "驗證", "info-leak": "資訊洩漏", version: "版本", other: "其他" };
+function renderReconPanel(recon) {
+  const box = $("#reconPanel"); if (!box) return;
+  recon = recon || [];
+  if (!recon.length) { box.innerHTML = ""; return; }
+  const rows = recon.map(x => {
+    const cat = _RECON_CAT[x.category] || x.category || "其他";
+    const conf = x.confidence || "low";
+    const ev = (x.evidence || []).join("、");
+    const tip = [x.note, x.source].filter(Boolean).join("\n");
+    return `<div class="recon-row${x.category === "info-leak" ? " leak" : ""}" title="${esc(tip)}">
+      <span class="recon-cat">${esc(cat)}</span>
+      <span class="recon-reveal">${esc(x.reveals)}</span>
+      <span class="recon-conf conf-${esc(conf)}">${esc(conf)}</span>
+      <span class="recon-ev" title="命中證據:${esc(ev)}">${esc(ev)}</span>
+    </div>`;
+  }).join("");
+  box.innerHTML = `<div class="recon-head">目標情報 <span class="recon-hint">從請求推斷 · 僅描述此請求 · 可偽造</span></div>${rows}`;
 }
 function priorBadge(p) {
   let cls, label;
@@ -2914,10 +2937,12 @@ async function loadRules() {
     return;
   }
   tb.innerHTML = rules.map(r => {
-    const adv = r.purpose === "advise";
-    const purposeBadge = adv ? `<span class="badge tested">建議</span>` : `<span class="badge skip">過濾</span>`;
-    const desc = adv
-      ? `${esc(r.vuln_class || "")}${r.note ? (r.vuln_class ? " · " : "") + esc(r.note) : ""}`
+    const purposeBadge = r.purpose === "advise" ? `<span class="badge tested">建議</span>`
+      : r.purpose === "recon" ? `<span class="badge recon">情報</span>`
+      : `<span class="badge skip">過濾</span>`;
+    const concl = r.purpose === "recon" ? (r.reveals || "") : (r.vuln_class || "");
+    const desc = concl
+      ? `${esc(concl)}${r.category ? ` <span class="dim">[${esc(r.category)}]</span>` : ""}${r.note ? " · " + esc(r.note) : ""}`
       : esc(r.note || "");
     return `
     <tr>
@@ -2947,13 +2972,16 @@ async function addRule() {
   if (!pattern) { toast("請填樣式", "err"); return; }
   const scope = state.ruleScope || "global";
   const val = id => { const el = $(id); return el ? el.value.trim() : ""; };
+  const purpose = val("#rPurpose") || "filter";
+  const concl = val("#rVulnClass");   // the shared "結論" field: advise=類別, recon=揭露
   try {
     await api("/api/rules", "POST", {
       kind: $("#rKind").value, mode: $("#rMode").value, pattern,
       note: $("#rNote").value.trim(),
-      purpose: val("#rPurpose") || "filter",
+      purpose,
       location: val("#rLocation"),
-      vuln_class: val("#rVulnClass"),
+      vuln_class: purpose === "advise" ? concl : "",
+      reveals: purpose === "recon" ? concl : "",
       project_id: scope === "global" ? null : state.projectId,
     });
     $("#rPattern").value = ""; $("#rNote").value = "";
