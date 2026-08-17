@@ -5,19 +5,27 @@ and reading a finished/streaming log to decide "vulnerable?" + extract findings.
 import re
 
 
+def _is_testable(p):
+    # a multipart file-upload field (is_file / location FILE) is NEVER a SQLi test
+    # target, no matter what the UI/client selected -- enforced here so the "files are
+    # never fuzzed" guarantee holds on every path (parse, scan, preview), not just the
+    # parse-time default.
+    return bool(p.get("selected")) and not p.get("is_file") and p.get("location") != "FILE"
+
+
 def selected_names(params):
-    # unique names that are selected in AT LEAST ONE location
-    return sorted({p["name"] for p in params if p.get("selected")})
+    # unique names that are selected (and testable) in AT LEAST ONE location
+    return sorted({p["name"] for p in params if _is_testable(p)})
 
 
 def deselected_names(params):
-    # A name is only a "skip" candidate if it is NOT selected anywhere. Otherwise
-    # a name present in two locations (e.g. GET id + COOKIE id) with mixed
-    # selection would land in BOTH testParameter and skip -- contradictory,
-    # since sqlmap/ghauri filter by NAME, not by location.
-    sel = {p["name"] for p in params if p.get("selected")}
+    # A name is only a "skip" candidate if it is NOT testable-selected anywhere.
+    # Otherwise a name present in two locations (e.g. GET id + COOKIE id) with mixed
+    # selection would land in BOTH testParameter and skip -- contradictory, since
+    # sqlmap/ghauri filter by NAME, not by location. File fields are always here.
+    sel = {p["name"] for p in params if _is_testable(p)}
     return sorted({p["name"] for p in params
-                   if not p.get("selected") and p["name"] not in sel})
+                   if not _is_testable(p) and p["name"] not in sel})
 
 
 def display_cmd(parts):

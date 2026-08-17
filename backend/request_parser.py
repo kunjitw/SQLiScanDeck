@@ -206,7 +206,9 @@ def _multipart_filename(cd):
 
 
 def _multipart_boundary(content_type):
-    m = re.search(r'boundary=(?:"([^"]+)"|([^";]+))', content_type or "", re.I)
+    # anchor before 'boundary=' to a param delimiter so a decoy like 'myboundary=Z'
+    # (or a vendor 'x-boundary=') can't be picked ahead of the real boundary=.
+    m = re.search(r'(?:^|[;\s])boundary=(?:"([^"]+)"|([^";]+))', content_type or "", re.I)
     return (m.group(1) or m.group(2)).strip() if m else None
 
 
@@ -245,7 +247,15 @@ def _parse_multipart(body, content_type):
         #    only attach a Content-Type to file parts; text fields normally have none).
         has_fn = re.search(r'(?i)\bfilename\*?\s*=', cd) is not None
         ct_low = part_ct.lower()
-        ct_file = bool(part_ct) and not ct_low.startswith("text/") and "application/json" not in ct_low
+        # A per-part Content-Type only marks a file when it is a KNOWN-BINARY media type.
+        # Textual types (application/xml, x-www-form-urlencoded, graphql, soap+xml,
+        # ld+json, ...) are legit INJECTABLE form fields -- never misclassify them as
+        # uploads. (filename= above stays the primary, reliable file signal.)
+        ct_file = ct_low.startswith(("image/", "audio/", "video/", "font/", "model/")) \
+            or "octet-stream" in ct_low \
+            or ct_low in ("application/pdf", "application/zip", "application/gzip",
+                          "application/x-7z-compressed", "application/x-rar-compressed",
+                          "application/x-tar", "application/msword", "application/vnd.ms-excel")
         if has_fn or ct_file:
             fn = _multipart_filename(cd)
             summary = "檔案上傳:{}{} · {} bytes".format(

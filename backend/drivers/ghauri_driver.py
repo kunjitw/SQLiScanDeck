@@ -213,6 +213,9 @@ def run(ctx):
     findings = base.extract_findings(log_text)
     vulnerable, vuln_marker = base.merge_vuln(vuln_marker, findings)  # fold per-param confirmation in
     waf_marker, _waf_line = base.waf_evidence(log_text)
+    # stamp reliability BEFORE the killed/done split (see sqlmap_driver) so a killed+vuln
+    # run can't record a co-param 'clean' against an untrustworthy baseline.
+    findings["reliability_ok"] = base.severe_reliability(log_text)[0] is None
 
     if killed:
         recorded = ctx.finish(status="killed", vulnerable=vulnerable, findings=findings)
@@ -238,8 +241,6 @@ def run(ctx):
         # the selected params; a clean signal amid an error storm or without coverage
         # becomes 'inconclusive' (測不準); rc!=0 or no clean signal at all stays 'error'.
         status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text)
-        # baseline trustworthy? (see sqlmap_driver) -- gates downstream clean recording.
-        findings["reliability_ok"] = base.severe_reliability(log_text)[0] is None
         inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text)
                              if status == "inconclusive" else None)
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)

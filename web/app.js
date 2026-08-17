@@ -1273,7 +1273,7 @@ function paramRowHtml(i) {
   const p = state.params[i];
   const anom = _paramAnomaly(p);
   return `<tr class="prow ${p.selected ? "sel" : "unsel"}${anom ? " anomaly-row" : ""}" data-row="${i}">
-    <td><input type="checkbox" data-idx="${i}" ${p.selected ? "checked" : ""}></td>
+    <td><input type="checkbox" data-idx="${i}" ${p.selected ? "checked" : ""}${p.location === "FILE" ? " disabled title=\"檔案上傳欄位不做 SQLi 測試\"" : ""}></td>
     <td class="pname${anom ? " anomaly" : ""}">${esc(p.name)}${anom ? `<span class="anomaly-flag" title="${esc(anom)}">⚠</span>` : ""}</td>
     <td><span class="loc-chip">${esc(p.location)}</span></td>
     <td class="val-cell${anom ? " anomaly" : ""}" title="${anom ? esc(anom) : esc(p.value)}">${esc(p.value)}</td>
@@ -1394,6 +1394,7 @@ function renderParams() {
 }
 function selectParams(mode) {
   state.params.forEach(p => {
+    if (p.location === "FILE") { p.selected = false; return; }   // never SQLi-fuzz a file field
     if (mode === "all") p.selected = true;
     else if (mode === "none") p.selected = false;
     else if (mode === "suggest") p.selected = !p.filtered && p.location !== "HEADER";
@@ -2618,7 +2619,7 @@ const HL_HEX = { hit: "#e5c07b", clean: "#6a9955", enum: "#4ec9b0", verdict: "#6
 // English log) still lights its own evidence instead of showing no highlight at all.
 const _HL_VULN_RE = /(\bis vulnerable\b|\bis injectable\b|appears to be '[^']*' injectable|identified the following injection|injection point on)/i;
 const _HL_CLEAN_RE = /(does not seem to be injectable|do not appear to be injectable|might not be injectable)/i;
-const _HL_ENUM_RE = /(^|[^A-Za-z])(Parameter|Type|Title|Payload):/;   // ghauri/sqlmap injection summary (case-sensitive: skip "GET parameter")
+const _HL_ENUM_RE = /(?:^|[\]\s])(Parameter|Type|Title|Payload):\s/;   // injection summary; needs space before+after so "Content-Type:"/"GET parameter" don't match
 function _termKey(line) {
   if (line.includes("【判定】")) return "verdict";
   const m = line.match(/\[(INFO|WARNING|ERROR|CRITICAL|PAYLOAD|DEBUG)\]/);

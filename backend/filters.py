@@ -453,6 +453,8 @@ def recon(params, rules):
         if not rule.get("pattern"):
             continue
         reveals = rule.get("reveals", "") or rule.get("note", "")
+        if not reveals:
+            continue                        # no label -> can't aggregate; skip (avoids a blank '' bucket)
         for p in params:
             if not _rule_matches(p, rule):
                 continue

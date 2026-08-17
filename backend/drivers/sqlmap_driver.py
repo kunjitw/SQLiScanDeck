@@ -186,6 +186,10 @@ def run(ctx):
     findings = base.extract_findings(log_text)
     vulnerable, vuln_marker = base.merge_vuln(vuln_marker, findings)  # fold per-param confirmation in
     waf_marker, _waf_line = base.waf_evidence(log_text)
+    # stamp reliability BEFORE the killed/done split: a killed+vulnerable run also records
+    # param history, so without this its co-params' "clean" lines would be recorded against
+    # an untrustworthy baseline (reliability_ok would default True), defeating the guard.
+    findings["reliability_ok"] = base.severe_reliability(log_text)[0] is None
 
     if killed:
         recorded = ctx.finish(status="killed", vulnerable=vulnerable, findings=findings)
@@ -215,9 +219,6 @@ def run(ctx):
         # becomes 'inconclusive' (測不準) -- never a groundless 無洞. rc!=0 or no clean
         # signal at all is still 'error'.
         status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text)
-        # baseline trustworthy? a severe-reliability run's per-param "clean" lines rest
-        # on the same rejected baseline, so downstream must NOT paint/record them clean.
-        findings["reliability_ok"] = base.severe_reliability(log_text)[0] is None
         inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text)
                              if status == "inconclusive" else None)
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
