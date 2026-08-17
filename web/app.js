@@ -154,7 +154,12 @@ function resetComposeTabs() {
 // compose tabs are scoped PER PROJECT (they hold that project's raw requests/cookies) --
 // a single global key leaked one project's tabs into another. Switching projects saves
 // the old project's tabs and restores the new one's (see setProject).
-function tabsKey() { return "composeTabs:" + (state.projectId != null ? state.projectId : "none"); }
+function tabsKey() {
+  const ds = state.datasetId != null ? state.datasetId : "0";   // dataset-scoped: a swapped data/ can't collide on project id
+  return "composeTabs:" + ds + ":" + (state.projectId != null ? state.projectId : "none");
+}
+// which project THIS browser last had open, also scoped per dataset (id 1 means different projects across datasets)
+function _lastProjectKey() { return "lastProject:" + (state.datasetId != null ? state.datasetId : "0"); }
 function _tabsBlob() { return JSON.stringify({ tabs: state.tabs, activeTabId: state.activeTabId, seq: _tabSeq }); }
 // localStorage is the fast local cache (per-browser); the DB copy (in data/) is what lets the
 // tabs survive a move to another machine. Detail tabs are just a scanId ref, so nothing is
@@ -186,10 +191,10 @@ function saveTabs() {
 }
 function restoreTabs() {
   let data = null;
-  // Prefer the DB copy: it travels with data/ and is always correct for THIS dataset. localStorage
-  // is keyed by a numeric project id that collides across swapped data/ sets, so trusting it first
-  // could serve another dataset's tabs (with its cookies) -> only use it as a crash-recovery
-  // fallback when the DB copy is empty.
+  // Prefer the DB copy: it travels with data/ and is always correct for THIS dataset. The localStorage
+  // fallback is now keyed by dataset_id (see tabsKey), so it can only ever serve THIS dataset's own
+  // tabs -- a fresh clone / swapped data/ gets a new dataset_id and simply finds no cached tabs, instead
+  // of surfacing another dataset's (with its cookies). localStorage stays a crash-recovery cache only.
   const proj = (state.projects || []).find(p => p.id === state.projectId);
   if (proj && proj.tabs_json) { try { data = JSON.parse(proj.tabs_json); } catch (e) {} }
   if (!(data && Array.isArray(data.tabs) && data.tabs.length)) {
@@ -988,10 +993,17 @@ async function refreshHealth() {
 
 // ===== projects ===========================================================
 async function loadProjects() {
+  // dataset_id first: it scopes our per-dataset localStorage (compose tabs, last project) so a fresh
+  // clone / swapped data/ can never restore ANOTHER dataset's cached tabs. Must be set before any
+  // tabsKey()/restoreTabs() runs (setProject below triggers restoreTabs).
+  if (state.datasetId == null) {
+    try { const m = await api("/api/meta"); state.datasetId = (m && m.dataset_id) || "0"; }
+    catch (e) { state.datasetId = "0"; }
+  }
   state.projects = await api("/api/projects");
   if (!state.projects.length) { state.projectId = null; updateCurrentProjectLabel(); showProjectsView(true); openNewProject(); return false; }
   let pid = null;
-  try { pid = Number(localStorage.getItem("projectId")) || null; } catch (e) {}
+  try { pid = Number(localStorage.getItem(_lastProjectKey())) || null; } catch (e) {}
   if (!state.projects.some(p => p.id === pid)) pid = state.projects[0].id;
   setProject(pid);
   return true;
@@ -1009,7 +1021,7 @@ function setProject(pid) {
   state.projectId = pid;
   state.treeExpanded = null; state.treeKey = ""; state.currentTarget = null;   // reset per project
   updateCurrentProjectLabel();
-  try { localStorage.setItem("projectId", String(pid)); } catch (e) {}
+  try { localStorage.setItem(_lastProjectKey(), String(pid)); } catch (e) {}
   restoreTabs(); renderComposeTabs(); applyTab(_activeTab());   // load THIS project's own tab set
 }
 function requireProject() { if (state.projectId == null) { toast("請先建立並選擇一個專案", "err"); showProjectsView(true); return false; } return true; }
@@ -1058,7 +1070,7 @@ function renderProjectsList() {
     if (!ok) return;
     try {
       await api(`/api/projects/${id}`, "DELETE");
-      if (state.projectId === id) { try { localStorage.removeItem("projectId"); } catch (e) {} state.projectId = null; }
+      if (state.projectId === id) { try { localStorage.removeItem(_lastProjectKey()); } catch (e) {} state.projectId = null; }
       await loadProjects(); renderProjectsList();
       toast("已刪除", "ok");
     } catch (e) { toast("刪除失敗:" + e.message, "err"); }

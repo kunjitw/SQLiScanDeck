@@ -91,6 +91,14 @@ def health():
     return {"ok": True, "sqlmap_present": os.path.isfile(config.SQLMAPAPI_PY)}
 
 
+@app.get("/api/meta")
+def api_meta():
+    # Opaque per-dataset id (born with data/, travels with it). The web UI scopes its
+    # per-dataset localStorage by this so a fresh clone / swapped data/ can never restore
+    # another dataset's cached compose tabs. Just a random token -> no loopback gating.
+    return {"dataset_id": db.get_dataset_id()}
+
+
 @app.get("/api/ip")
 def api_ip():
     s = manager.settings

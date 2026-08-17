@@ -141,6 +141,11 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_pstatus_ep ON param_status(project_id, sig_endpoint);
             CREATE INDEX IF NOT EXISTS idx_ptest_ep ON param_test(project_id, sig_endpoint, name, location);
             CREATE INDEX IF NOT EXISTS idx_ptest_scan ON param_test(scan_id);
+
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,   -- dataset_id: random id born with this data/ dir, travels with the DB
+                value TEXT
+            );
             """
         )
         # migrate older DBs that predate the templates.tool column
@@ -175,10 +180,31 @@ def init_db():
             except Exception:
                 pass
         conn.commit()
+        get_dataset_id()   # stamp a random dataset_id at DB birth (RLock is reentrant)
         _seed_default_rules()
         _seed_default_templates()
         _seed_preset_templates()
         _migrate_preset_desc()
+
+
+def get_dataset_id():
+    """Random id identifying THIS data/ dir. Generated once, stored in the DB, so it
+    travels with the DB (a moved data/ keeps its id; a fresh clone gets a new one).
+
+    The web UI scopes its per-dataset localStorage -- compose tabs (which embed that
+    dataset's raw requests/cookies) and the last-opened project -- by this id. That
+    way a fresh clone or a swapped data/ can never restore ANOTHER dataset's cached
+    tabs just because both happen to have a numeric project id 1."""
+    import uuid
+    with _lock:
+        conn = _connect()
+        row = conn.execute("SELECT value FROM meta WHERE key='dataset_id'").fetchone()
+        if row and row["value"]:
+            return row["value"]
+        did = uuid.uuid4().hex
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('dataset_id', ?)", (did,))
+        conn.commit()
+        return did
 
 
 def _seed_default_rules():
