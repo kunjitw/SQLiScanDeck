@@ -1,0 +1,322 @@
+[
+  {
+    "_group": "serialization / deserialization (value-shape, high precision)",
+    "kind": "value", "mode": "regex", "pattern": "^AAEAAAD(/////|_____)",
+    "vuln_class": ".NET 反序列化 (BinaryFormatter / NetDataContractSerializer / SoapFormatter)",
+    "tool": "ysoserial.net", "confidence": "high",
+    "note": "解出來是 BinaryFormatter SerializationHeaderRecord(RootId=1、HeaderId=0xFFFFFFFF)。誤判防呆:必須完整 12 字元 AAEAAAD/////(FFFFFFFF=/////才唯一);AAEAAAA 太短、是常見 base64。",
+    "source": "https://github.com/pwntester/ysoserial.net"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^__VIEWSTATE$",
+    "vuln_class": ".NET 反序列化 (ASP.NET ViewState via LosFormatter/ObjectStateFormatter)",
+    "tool": "ysoserial.net (ViewState plugin)", "confidence": "medium",
+    "note": "ViewState 以 LosFormatter 序列化。危險條件:enableViewStateMac=false 或 machineKey 洩漏/預設,否則不可偽造。測法:送一段短亂數看是否出現驗證錯誤。",
+    "source": "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/"
+  },
+  {
+    "kind": "value", "mode": "prefix", "pattern": "/wE", "location": "POST",
+    "vuln_class": ".NET 反序列化 (ViewState 值,/wE = 0xFF 0x01)",
+    "tool": "ysoserial.net", "confidence": "low",
+    "note": "0xFF01(LosFormatter 簽章版本)base64=/wE。誤判防呆:限 POST 隱藏欄位;任何 FF 01 開頭都 base64 成 /wE。有 MAC 保護且不知 machineKey 則不可偽造。",
+    "source": "https://owasp.org/www-project-web-security-testing-guide/latest/"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "\"\\$type\"\\s*:",
+    "vuln_class": ".NET 反序列化 (Json.NET / Newtonsoft TypeNameHandling)",
+    "tool": "manual / ysoserial.net", "confidence": "low",
+    "note": "$type 只有在伺服器 TypeNameHandling != None 時危險;要 assembly-qualified 名(含逗號+組件)。System.Text.Json 的 $type 是允許清單,不同 sink。",
+    "source": "https://www.newtonsoft.com/json/help/html/SerializeTypeNameHandling.htm"
+  },
+  {
+    "kind": "value", "mode": "prefix", "pattern": "rO0AB",
+    "vuln_class": "Java 反序列化 (native serialization)",
+    "tool": "ysoserial", "confidence": "high",
+    "note": "rO0AB = base64 of magic AC ED 00 05,安全錨(無 benign 格式共用)。可加 transform base64decode + magic 'AC ED 00 05' 進一步確認。",
+    "source": "https://github.com/frohoff/ysoserial"
+  },
+  {
+    "kind": "value", "mode": "prefix", "pattern": "rO0AB", "transform": ["base64decode"],
+    "vuln_class": "Java 反序列化 (magic 確認)",
+    "tool": "ysoserial", "confidence": "high",
+    "note": "示範 transform:base64decode 後用 magic 比對解出來的位元組是否為 AC ED 00 05。",
+    "source": "https://github.com/frohoff/ysoserial"
+  },
+  {
+    "kind": "value", "mode": "prefix", "pattern": "H4sI",
+    "vuln_class": "gzip 壓縮 payload(解壓後重新判定)",
+    "tool": "manual", "confidence": "medium",
+    "note": "H4sI = gzip magic 1F 8B 08 的 base64。解壓後 body 可能是 rO0AB / AAEAAAD///// / PHP O: / pickle。建議 transform: base64decode → gunzip 後重跑指紋。",
+    "source": "https://datatracker.ietf.org/doc/html/rfc1952"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^(O:\\d+:\"|a:\\d+:\\{|Tzo[0-9]|YTo[0-9])",
+    "vuln_class": "PHP 反序列化 (unserialize object/array)",
+    "tool": "phpggc", "confidence": "high",
+    "note": "O:\\d:\"...\" = 物件、a:\\d:{ = 陣列;base64 形為 Tzo(O:)/ YTo(a:)。url-encoded O%3A 也算。",
+    "source": "https://www.php.net/manual/en/function.unserialize.php"
+  },
+  {
+    "kind": "value", "mode": "prefix", "pattern": "gAS",
+    "vuln_class": "Python 反序列化 (pickle proto>=2)",
+    "tool": "manual", "confidence": "medium",
+    "note": "gAS = base64 of 80 04 95(pickle proto 4)/ 80 02(proto 2 = gAI)。誤判防呆:proto 0/1 無 0x80 magic → 抓不到;0x80 也撞 MessagePack,建議 pickletools.dis 確認。",
+    "source": "https://docs.python.org/3/library/pickle.html"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^BAh[v7b]",
+    "vuln_class": "Ruby 反序列化 (Marshal.load)",
+    "tool": "manual", "confidence": "medium",
+    "note": "04 08 = Marshal 版本 4.8;BAhv/BAhb/BAh7 = 04 08 + o/[/{(物件/陣列/雜湊型別位元組)。裸 BAg(04 08)較弱。常見於 secret_key_base 洩漏的 Rails cookie。",
+    "source": "https://ruby-doc.org/core/Marshal.html"
+  },
+  {
+    "_group": "tokens (JWT / framework / crypto)",
+    "kind": "value", "mode": "regex", "pattern": "^eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*$",
+    "vuln_class": "JWT 攻擊 (alg:none / 弱金鑰 / alg 混淆 / kid 注入 / claim 注入)",
+    "tool": "jwt_tool", "confidence": "high",
+    "note": "三段 base64url。sqlmap 盲改沒用(簽章一壞就 401);要用 jwt_tool 看簽章破綻,破了再把 SQLi payload 塞進 claim。誤判防呆:撞 Flask session,解 header 為 {\"alg\":.. 才是 JWT。",
+    "source": "https://portswigger.net/web-security/jwt"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "alg\"\\s*:\\s*\"(?i:none)",
+    "transform": ["split-dot[0]", "base64decode"],
+    "vuln_class": "JWT alg:none(可偽造 token)",
+    "tool": "jwt_tool", "confidence": "high",
+    "note": "示範 transform:取第一段 → base64decode → 比對 header 是否 {\"alg\":\"none\"}。若成立則簽章形同虛設,可任意偽造 claim。",
+    "source": "https://portswigger.net/web-security/jwt/algorithm-confusion"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^eyJ[A-Za-z0-9_=+/-]+={0,2}$",
+    "vuln_class": "未簽章可竄改狀態 (single base64 JSON blob)",
+    "tool": "manual", "confidence": "medium",
+    "note": "單段 base64(無 .sig)解開是 JSON 物件 = 可直接改。有三段點的是 JWT(另條規則)。建議 transform base64decode+json 進一步確認結構。",
+    "source": "https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html"
+  },
+  {
+    "kind": "value", "mode": "prefix", "pattern": "CfDJ8", "location": "COOKIE",
+    "vuln_class": "ASP.NET Core Data Protection 加密 cookie(勿注入)",
+    "tool": "—", "confidence": "high",
+    "note": "認證加密(AES-256-CBC+HMAC),不可竄改/偽造 → 非 SQLi/XSS/反序列化面。僅在 Data Protection 金鑰洩漏時才有 token 偽造面。已由過濾規則自動略過。",
+    "source": "https://learn.microsoft.com/en-us/aspnet/core/security/data-protection/implementation/authenticated-encryption-details"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^\\.?eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+    "location": "COOKIE",
+    "vuln_class": "Flask/itsdangerous session(簽章;弱 SECRET_KEY 可偽造)",
+    "tool": "flask-unsign", "confidence": "medium",
+    "note": "格式 PAYLOAD.TIMESTAMP.HMAC(base64url),開頭 '.' 表 zlib 壓縮。弱/洩漏的 SECRET_KEY → 可偽造 session。與 JWT 用 header 內容區分。",
+    "source": "https://github.com/Paradoxis/Flask-Unsign"
+  },
+  {
+    "kind": "value", "mode": "len-mod", "pattern": "16,8", "transform": ["base64decode"],
+    "vuln_class": "對稱加密 blob(可能 padding oracle)",
+    "tool": "padbuster", "confidence": "low",
+    "note": "解碼長度為 8(DES/3DES)或 16(AES)的倍數。誤判防呆:區塊對齊本身弱證據(隨機 token/雜湊常是 16/32 bytes);要(a)無 MAC/GCM 尾 且(b)伺服器回可辨別的 padding 錯誤;排除 CfDJ8 等認證加密。",
+    "source": "https://en.wikipedia.org/wiki/Padding_oracle_attack"
+  },
+  {
+    "_group": "SQL injection (name-keyword + value context)",
+    "kind": "name", "mode": "regex", "pattern": "^(id|uid|pid|cid|gid|tid|aid|user_?id|item_?id|prod(uct)?_?id|cat(egory)?_?id|order_?id|record_?id|post_?id|group_?id|no|num|ref)$",
+    "vuln_class": "SQLi (WHERE / 整數選擇子) + IDOR/越權",
+    "tool": "sqlmap", "confidence": "high",
+    "note": "整數識別碼常被無引號串進 WHERE。誤判防呆:key/token/sid 常是不透明 token;建議配合整數值再升信心。同時是 IDOR 候選(換 id 看能否越權)。",
+    "source": "https://portswigger.net/web-security/sql-injection"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(sort|order|orderby|order_?by|sort_?by|sortorder|sort_?order|sort_?dir|dir|direction|col_?sort)$",
+    "vuln_class": "SQLi (ORDER BY / 欄位語境)",
+    "tool": "sqlmap", "confidence": "medium",
+    "note": "值落在 ORDER BY 後方,引號無效,靠欄位索引或 CASE-boolean 注入。誤判防呆:order 常是訂單物件(整數選擇子);配 asc/desc 兄弟欄位才升。",
+    "source": "https://portswigger.net/web-security/sql-injection"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^(?i:asc|desc)$",
+    "vuln_class": "SQLi (ORDER BY 方向)",
+    "tool": "sqlmap", "confidence": "low",
+    "note": "asc/desc 值暗示參數是 ORDER BY 尾。單看值很弱,要 host 參數名在 sort/order 家族才 actionable。",
+    "source": "https://portswigger.net/web-security/sql-injection"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(limit|offset|per_?page|page_?size|pagesize|rows|row_?count|start|length|top|skip)$",
+    "vuln_class": "SQLi (LIMIT / OFFSET)",
+    "tool": "sqlmap", "confidence": "medium",
+    "note": "LIMIT/OFFSET 後的數字無引號。誤判防呆:max/top/first/length/start 也是通用 UI/count 名;start/length 是 DataTables 伺服器端名(確實映射 LIMIT/OFFSET,真陽性)。",
+    "source": "https://portswigger.net/web-security/sql-injection"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(q|query|search|keyword|kw|s|term|find|filter|criteria|lookup)$",
+    "vuln_class": "SQLi (WHERE / LIKE 搜尋)",
+    "tool": "sqlmap", "confidence": "low",
+    "note": "搜尋值嵌進 LIKE '%..%'。最吵的一類,重疊 NoSQL/LDAP/XPath/SSTI/XSS;別只靠名稱,要 quote 探測回應或關聯式後端佐證才升。",
+    "source": "https://portswigger.net/web-security/sql-injection"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(User-Agent|Referer|Referrer|X-Forwarded-For|X-Real-IP|X-Client-IP|True-Client-IP|CF-Connecting-IP|Forwarded|Via)$",
+    "location": "HEADER",
+    "vuln_class": "二階 SQLi(請求記錄)/ stored XSS(log viewer)/ SSRF",
+    "tool": "sqlmap (--headers)", "confidence": "medium",
+    "note": "稽核/分析碼把原始標頭 INSERT 進 DB,payload 在 log 檢視頁才觸發(盲/二階)。X-Forwarded-For/Forwarded 可偽造;逐一測,只有被記錄的到 sink。",
+    "source": "https://portswigger.net/kb/issues/00100210_sql-injection-second-order"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(username|user|nick(name)?|display_?name|screen_?name|handle|alias|email|first_?name|last_?name|full_?name|bio|about|address|city|company|comment|message)$",
+    "location": "POST",
+    "vuln_class": "二階 / stored SQLi",
+    "tool": "sqlmap (--second-order) / manual", "confidence": "medium",
+    "note": "註冊/個資值先存、稍後在別的查詢(後台清單/搜尋/報表)被未參數化重用 → 注入在別的請求浮現。要兩請求 oracle 才能確認。重疊 stored XSS。",
+    "source": "https://portswigger.net/kb/issues/00100210_sql-injection-second-order"
+  },
+  {
+    "_group": "NoSQL / command / template / XML / expression",
+    "kind": "value", "mode": "json-key", "pattern": "$*", "transform": ["json"],
+    "vuln_class": "NoSQL 注入 (MongoDB 運算子 $ne/$gt/$where/$regex)",
+    "tool": "nosqlmap", "confidence": "medium",
+    "note": "值 parse 成 JSON 後,key 位置出現 $ 開頭運算子 = 典型 Mongo 運算子注入。$ 必須在 key,不是 value。",
+    "source": "https://www.mongodb.com/docs/manual/reference/operator/query/"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(cmd|command|exec|run|ping|host|ip|dns|lookup|nslookup|traceroute|system|shell|do|func|call|process|jobs|task)$",
+    "vuln_class": "OS 命令注入",
+    "tool": "commix", "confidence": "low",
+    "note": "名稱暗示值餵進系統呼叫。很吵(host/ip 也是 SSRF);用 ;`|$() 等 shell 元字元 + 時間延遲探測。",
+    "source": "https://owasp.org/www-community/attacks/Command_Injection"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "\\{\\{.+\\}\\}|\\$\\{.+\\}|#\\{.+\\}|<%.+%>|%\\{.+\\}|T\\(java",
+    "vuln_class": "SSTI / OGNL / SpEL / EL 表達式注入",
+    "tool": "tplmap", "confidence": "low",
+    "note": "值已含模板/表達式語法({{ }} / ${ } / #{ } / <% %> / %{ } / T(java...))。多半是你自己注入的探針;當作測試建議。",
+    "source": "https://portswigger.net/research/server-side-template-injection"
+  },
+  {
+    "kind": "value", "mode": "contains", "pattern": "${jndi:",
+    "vuln_class": "Log4Shell / JNDI lookup 注入",
+    "tool": "manual", "confidence": "high",
+    "note": "值含 ${jndi:ldap://...}。對任何會被記錄的字串參數(尤其 User-Agent/搜尋)嘗試 JNDI lookup。",
+    "source": "https://www.cisa.gov/news-events/alerts/2021/12/10/apache-log4j-vulnerability-guidance"
+  },
+  {
+    "kind": "value", "mode": "prefix", "pattern": "<?xml",
+    "vuln_class": "XXE (XML external entity)",
+    "tool": "manual", "confidence": "medium",
+    "note": "值/請求體是 XML → 測外部實體(<!DOCTYPE ... SYSTEM>)。content-type application/xml 同理。",
+    "source": "https://portswigger.net/web-security/xxe"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "%0[dD]%0[aA]|\\r\\n|%0[dD]|%0[aA]",
+    "vuln_class": "CRLF / HTTP 回應分割 / 標頭注入",
+    "tool": "manual", "confidence": "low",
+    "note": "值含 CRLF(%0d%0a)。誤判防呆:多字節字元 URL-encode(如 %E5%98%8A)被截斷成低位元組也可能觸發,但那是編碼 bug 不是 overlong UTF-8。",
+    "source": "https://owasp.org/www-community/vulnerabilities/CRLF_Injection"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(email|to|from|cc|bcc|subject|sender|reply_?to|recipient|mail)$",
+    "vuln_class": "SMTP / 郵件標頭注入",
+    "tool": "manual", "confidence": "low",
+    "note": "郵件相關欄位若拼進郵件標頭,換行可注入額外收件人/標頭。",
+    "source": "https://owasp.org/www-community/vulnerabilities/CRLF_Injection"
+  },
+  {
+    "_group": "XSS / open-redirect / SSRF / traversal",
+    "kind": "name", "mode": "regex", "pattern": "^(q|s|query|search|searchterm|search_query|keyword|keywords|term|text|find|filter|p|msg|message|error)$",
+    "location": "GET",
+    "vuln_class": "reflected XSS",
+    "tool": "dalfox / XSStrike", "confidence": "medium",
+    "note": "搜尋/回顯參數常被原樣反射進結果頁。名稱只是候選,要看到值出現在 HTML/屬性/JS 語境(非已編碼)才升。",
+    "source": "https://portswigger.net/web-security/cross-site-scripting/reflected"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(comment|comments|message|msg|body|content|desc|description|bio|about|nickname|name|displayname|username|title|subject|review|feedback|note|post|status|reply)$",
+    "location": "POST",
+    "vuln_class": "stored XSS",
+    "tool": "dalfox / manual", "confidence": "medium",
+    "note": "自由文字欄位稍後重新渲染給同一/其他使用者。是否未跳脫取決於模板;確認存下的值在可執行語境未跳脫。",
+    "source": "https://portswigger.net/web-security/cross-site-scripting/stored"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "[<>]|</?[a-zA-Z][^>]*>|&#?\\w+;",
+    "vuln_class": "XSS(欄位已接受 markup)",
+    "tool": "dalfox / manual", "confidence": "medium",
+    "note": "樣本值已帶 HTML 標籤/實體 → 欄位存/渲染 markup,sink 很可能是 HTML 語境。誤判防呆:吃 markup ≠ 過得了 sanitizer(DOMPurify),用真 gadget 測。",
+    "source": "https://portswigger.net/web-security/cross-site-scripting"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(url|uri|link|redirect|redirect_?uri|redirect_?url|return|return_?url|returnto|returnurl|next|dest|destination|continue|callback|goto|out|target|to|image_?url|file_?url|feed|host|domain|site|proxy|webhook|fetch|load)$",
+    "vuln_class": "open redirect / SSRF",
+    "tool": "manual / SSRFmap", "confidence": "medium",
+    "note": "接受 URL/主機的參數。open redirect(導向外部)與 SSRF(伺服器代抓內網)兩種都測。",
+    "source": "https://portswigger.net/web-security/ssrf"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^(https?:)?//|^\\\\\\\\",
+    "vuln_class": "SSRF / open redirect",
+    "tool": "manual / SSRFmap", "confidence": "medium",
+    "note": "值是 URL(http://、協定相對 //、UNC \\\\)。試改內網/雲端 metadata(169.254.169.254)。",
+    "source": "https://portswigger.net/web-security/ssrf"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^\\s*(?i:javascript|data|vbscript):",
+    "vuln_class": "XSS(redirect 中的危險 scheme)",
+    "tool": "manual", "confidence": "high",
+    "note": "redirect/href/url 值是 javascript:/data:text/html/vbscript: → open-redirect 升級成 XSS。http(s)-only 的值形狀抓不到這個。",
+    "source": "https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^(0x[0-9a-fA-F]{6,}|[0-9]{8,10}|0[0-9]+\\.[0-9]|\\[?::1\\]?|\\[?::ffff:)",
+    "vuln_class": "SSRF blocklist 繞過(替代 IP 編碼)",
+    "tool": "manual", "confidence": "low",
+    "note": "十進位 dword(2130706433)、hex(0x7f000001)、octal(0177.0.0.1)、IPv6 loopback(::1)、IPv4-mapped([::ffff:169.254.169.254])。驗證器與 socket 解讀不一致才是重點。",
+    "source": "https://portswigger.net/web-security/ssrf"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "\\.\\./|\\.\\.\\\\|%2e%2e|%c0%af|%c1%9c|(^|/)(etc|proc|windows|winnt)/|^[A-Za-z]:\\\\",
+    "vuln_class": "路徑穿越 / LFI",
+    "tool": "manual / dotdotpwn", "confidence": "medium",
+    "note": "值含 ../、絕對路徑、或 overlong UTF-8(%c0%af=/、%c1%9c=\\\\)。",
+    "source": "https://owasp.org/www-community/attacks/Path_Traversal"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(file|filename|filepath|path|dir|folder|include|require|template|tpl|page|doc|document|download|load|read|view|content|resource|attachment|img|image|photo|log|conf|config)$",
+    "vuln_class": "路徑穿越 / LFI / RFI",
+    "tool": "manual", "confidence": "medium",
+    "note": "檔名/路徑類參數。配合 ../ 或 php://filter 測本地檔讀取;若接受 http:// 也可能 RFI/SSRF。",
+    "source": "https://owasp.org/www-community/attacks/Path_Traversal"
+  },
+  {
+    "kind": "value", "mode": "regex", "pattern": "^(php|file|data|expect|phar|zip|zlib|glob|compress\\.\\w+)://|php://filter",
+    "vuln_class": "LFI(PHP wrapper)",
+    "tool": "manual", "confidence": "medium",
+    "note": "php://filter(讀原始碼)、phar://(反序列化)、data://、expect://(RCE)等 PHP 串流封裝。",
+    "source": "https://www.php.net/manual/en/wrappers.php"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "(^|\\.|\\[)(__proto__|constructor|prototype)(\\.|\\]|$)",
+    "vuln_class": "prototype pollution",
+    "tool": "manual", "confidence": "medium",
+    "note": "參數名含 __proto__ / constructor / prototype(bracket 或 dot 記法),遞迴合併時污染 Object 原型。",
+    "source": "https://portswigger.net/web-security/prototype-pollution"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(role|roles|is_?admin|isAdmin|admin|user_?type|usertype|permission|permissions|access_?level|is_?active|active|status|approved|verified|balance|price|amount|account_?type|owner|user_?id)$",
+    "vuln_class": "mass assignment / 越權欄位注入",
+    "tool": "manual", "confidence": "low",
+    "note": "敏感屬性若被 model 綁定接收,可能自行提權/改價。試在請求加入這些欄位看是否被接受。",
+    "source": "https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(query|variables|operationName)$",
+    "location": "POST",
+    "vuln_class": "GraphQL 注入 / 內省",
+    "tool": "manual / graphql-cop", "confidence": "low",
+    "note": "GraphQL 端點參數。測內省(__schema)、批次查詢、深層巢狀 DoS、以及 resolver 背後的 SQL/NoSQL 注入。",
+    "source": "https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html"
+  },
+  {
+    "kind": "name", "mode": "regex", "pattern": "^(cn|dn|ou|group|member|distinguishedName)$",
+    "vuln_class": "LDAP 注入",
+    "tool": "manual", "confidence": "low",
+    "note": "LDAP 目錄查詢欄位;用 *()\\ 等元字元測過濾字串注入(登入繞過/列舉)。",
+    "source": "https://owasp.org/www-community/attacks/LDAP_Injection"
+  }
+]

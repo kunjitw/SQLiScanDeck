@@ -52,10 +52,17 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER,            -- NULL = global
                 kind TEXT NOT NULL,            -- name | value
-                mode TEXT NOT NULL,            -- equals|iequals|prefix|contains|regex
+                mode TEXT NOT NULL,            -- equals|iequals|prefix|contains|regex|magic|json-key|len-mod
                 pattern TEXT NOT NULL,
                 note TEXT DEFAULT '',
                 enabled INTEGER DEFAULT 1,
+                purpose TEXT DEFAULT 'filter', -- filter (auto-deselect) | advise (suggest a test class)
+                location TEXT DEFAULT '',      -- '' / ANY = any location; else GET|POST|COOKIE|JSON|HEADER|PATH
+                transform TEXT DEFAULT '',     -- JSON list of decoders applied before match, e.g. ["base64decode"]
+                vuln_class TEXT DEFAULT '',    -- advise: candidate test class
+                tool TEXT DEFAULT '',          -- advise: recommended tool/technique
+                confidence TEXT DEFAULT '',    -- advise: high|medium|low
+                source TEXT DEFAULT '',        -- advise: authoritative reference URL
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
@@ -149,6 +156,20 @@ def init_db():
             conn.execute("ALTER TABLE projects ADD COLUMN tabs_json TEXT DEFAULT ''")
         except Exception:
             pass
+        # migrate older DBs that predate the filter_rules advise/transform columns
+        for _col, _decl in (
+            ("purpose", "TEXT DEFAULT 'filter'"),
+            ("location", "TEXT DEFAULT ''"),
+            ("transform", "TEXT DEFAULT ''"),
+            ("vuln_class", "TEXT DEFAULT ''"),
+            ("tool", "TEXT DEFAULT ''"),
+            ("confidence", "TEXT DEFAULT ''"),
+            ("source", "TEXT DEFAULT ''"),
+        ):
+            try:
+                conn.execute("ALTER TABLE filter_rules ADD COLUMN {} {}".format(_col, _decl))
+            except Exception:
+                pass
         conn.commit()
         _seed_default_rules()
         _seed_default_templates()
@@ -162,17 +183,24 @@ def _seed_default_rules():
     existing one when new defaults are added, without duplicating. User-created
     rules and user toggles on existing defaults are left untouched."""
     now = _now()
-    for r in filters_mod.DEFAULT_RULES:
+    defaults = ([dict(r, purpose="filter") for r in filters_mod.DEFAULT_RULES]
+                + [dict(r, purpose="advise") for r in filters_mod.load_advise_catalog()])
+    for r in defaults:
+        loc = r.get("location", "") or ""
         exists = _conn.execute(
-            "SELECT 1 FROM filter_rules WHERE project_id IS NULL AND kind=? AND mode=? AND pattern=?",
-            (r["kind"], r["mode"], r["pattern"]),
+            "SELECT 1 FROM filter_rules WHERE project_id IS NULL AND purpose=? "
+            "AND kind=? AND mode=? AND pattern=? AND IFNULL(location,'')=?",
+            (r["purpose"], r["kind"], r["mode"], r["pattern"], loc),
         ).fetchone()
         if not exists:
             _conn.execute(
-                "INSERT INTO filter_rules(project_id,kind,mode,pattern,note,enabled,created_at)"
-                " VALUES(NULL,?,?,?,?,?,?)",
+                "INSERT INTO filter_rules(project_id,kind,mode,pattern,note,enabled,"
+                "purpose,location,transform,vuln_class,tool,confidence,source,created_at)"
+                " VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (r["kind"], r["mode"], r["pattern"], r.get("note", ""),
-                 1 if r.get("enabled", True) else 0, now),
+                 1 if r.get("enabled", True) else 0, r["purpose"], loc,
+                 _dump_transform(r.get("transform")), r.get("vuln_class", ""),
+                 r.get("tool", ""), r.get("confidence", ""), r.get("source", ""), now),
             )
     _conn.commit()
 
@@ -386,12 +414,35 @@ def list_rules(project_id=None):
         return out
 
 
-def create_rule(kind, mode, pattern, note="", project_id=None, enabled=True):
+def _dump_transform(t):
+    """Store the transform pipeline as a JSON array string. Accepts a list, a
+    JSON string, or a comma-separated string; returns '' for empty."""
+    if not t:
+        return ""
+    if isinstance(t, str):
+        s = t.strip()
+        if not s:
+            return ""
+        if s.startswith("["):
+            return s
+        return json.dumps([p.strip() for p in s.split(",") if p.strip()])
+    try:
+        return json.dumps(list(t))
+    except Exception:
+        return ""
+
+
+def create_rule(kind, mode, pattern, note="", project_id=None, enabled=True,
+                purpose="filter", location="", transform="", vuln_class="",
+                tool="", confidence="", source=""):
     with _lock:
         cur = _conn.execute(
-            "INSERT INTO filter_rules(project_id,kind,mode,pattern,note,enabled,created_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (project_id, kind, mode, pattern, note, 1 if enabled else 0, _now()),
+            "INSERT INTO filter_rules(project_id,kind,mode,pattern,note,enabled,"
+            "purpose,location,transform,vuln_class,tool,confidence,source,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (project_id, kind, mode, pattern, note, 1 if enabled else 0,
+             purpose or "filter", location or "", _dump_transform(transform),
+             vuln_class or "", tool or "", confidence or "", source or "", _now()),
         )
         _conn.commit()
         return _row(_conn.execute("SELECT * FROM filter_rules WHERE id=?",
@@ -399,7 +450,10 @@ def create_rule(kind, mode, pattern, note="", project_id=None, enabled=True):
 
 
 def update_rule(rule_id, **fields):
-    allowed = {"kind", "mode", "pattern", "note", "enabled"}
+    allowed = {"kind", "mode", "pattern", "note", "enabled", "purpose",
+               "location", "transform", "vuln_class", "tool", "confidence", "source"}
+    if "transform" in fields:
+        fields["transform"] = _dump_transform(fields["transform"])
     sets = {k: (1 if k == "enabled" and v else 0 if k == "enabled" else v)
             for k, v in fields.items() if k in allowed}
     if not sets:

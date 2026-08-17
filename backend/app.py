@@ -52,6 +52,9 @@ def _annotate_params(parsed, project_id):
     """Attach filter status + prior-test status to each detected parameter."""
     rules = db.list_rules(project_id)
     annotated = filters_mod.apply_filters(parsed.get("params", []), rules)
+    # heuristic "worth another test class" hints (deserialization/XSS/SSRF/...),
+    # computed from the SAME rules (purpose=advise); never changes selection.
+    filters_mod.apply_advice(annotated, rules)
 
     signature, sig_endpoint, endpoint = manager.prepare_target(parsed)
     prior = {}
@@ -167,12 +170,24 @@ def create_rule(payload: dict = Body(...)):
     pattern = payload.get("pattern")
     if kind not in ("name", "value"):
         raise HTTPException(400, "kind 必須是 name 或 value")
-    if mode not in ("equals", "iequals", "prefix", "contains", "regex"):
+    if mode not in ("equals", "iequals", "prefix", "contains", "regex",
+                    "magic", "json-key", "len-mod"):
         raise HTTPException(400, "不支援的 mode")
+    if (payload.get("purpose") or "filter") not in ("filter", "advise"):
+        raise HTTPException(400, "purpose 必須是 filter 或 advise")
     if not pattern:
         raise HTTPException(400, "pattern 不可為空")
-    return db.create_rule(kind, mode, pattern, payload.get("note", ""),
-                          payload.get("project_id"), payload.get("enabled", True))
+    return db.create_rule(
+        kind, mode, pattern, payload.get("note", ""),
+        payload.get("project_id"), payload.get("enabled", True),
+        purpose=payload.get("purpose", "filter"),
+        location=payload.get("location", ""),
+        transform=payload.get("transform", ""),
+        vuln_class=payload.get("vuln_class", ""),
+        tool=payload.get("tool", ""),
+        confidence=payload.get("confidence", ""),
+        source=payload.get("source", ""),
+    )
 
 
 @app.patch("/api/rules/{rid}")
