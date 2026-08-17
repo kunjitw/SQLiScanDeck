@@ -589,6 +589,14 @@ table tr:last-child td { border-bottom: none; }
 .pchip.pt { color: var(--warn); }                          /* 疑似(待確認) */
 .pchip.pu { color: var(--fg-dim); }                        /* 未確認(未測完) */
 .pchip.pu::before { content: "○"; }
+/* per-parameter "worth another test class" hints (candidate, not a finding) --
+   accent-family so they read as informational, never as a red/green verdict */
+.adv-cell { max-width: 20rem; }
+.adv-hints { display: flex; flex-wrap: wrap; gap: 0.2rem; }
+.advchip { font-size: 0.62rem; line-height: 1.5; padding: 0.02rem 0.34rem; border-radius: var(--radius-xs); border: 1px solid var(--border); color: var(--fg-soft); background: var(--bg-soft); white-space: nowrap; cursor: help; }
+.advchip.conf-high { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.advchip.conf-medium { color: var(--fg-soft); border-color: var(--border-strong); }
+.advchip.conf-low { opacity: 0.6; }
 .scan-row-top { display: flex; align-items: center; gap: 0.4rem; }
 .scan-tool { font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); font-weight: 600; flex-shrink: 0; }
 .scan-id { margin-left: auto; font-family: var(--font-mono); font-size: 0.68rem; color: var(--fg-dim); flex-shrink: 0; }

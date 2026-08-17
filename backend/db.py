@@ -189,8 +189,9 @@ def _seed_default_rules():
         loc = r.get("location", "") or ""
         exists = _conn.execute(
             "SELECT 1 FROM filter_rules WHERE project_id IS NULL AND purpose=? "
-            "AND kind=? AND mode=? AND pattern=? AND IFNULL(location,'')=?",
-            (r["purpose"], r["kind"], r["mode"], r["pattern"], loc),
+            "AND kind=? AND mode=? AND pattern=? AND IFNULL(location,'')=? "
+            "AND IFNULL(vuln_class,'')=?",
+            (r["purpose"], r["kind"], r["mode"], r["pattern"], loc, r.get("vuln_class", "") or ""),
         ).fetchone()
         if not exists:
             _conn.execute(

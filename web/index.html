@@ -79,7 +79,7 @@
       </div>
       <div class="table-scroll">
         <table class="params" id="paramsTable">
-          <thead><tr><th></th><th>參數</th><th>位置</th><th>樣本值</th><th>過濾</th><th>過去測試</th></tr></thead>
+          <thead><tr><th></th><th>參數</th><th>位置</th><th>樣本值</th><th>過濾</th><th>過去測試</th><th>建議另測</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -245,26 +245,32 @@
     </section>
 
     <section class="tabpanel panel hidden" id="tab-rules">
-      <div class="section-head"><span class="bar"></span>過濾規則</div>
-      <p class="panel-note"><b>全域</b>規則對所有專案生效;<b>本專案</b>規則只對目前專案生效。命中的參數會自動不勾選(仍可手動測回)。</p>
+      <div class="section-head"><span class="bar"></span>過濾 / 建議規則</div>
+      <p class="panel-note"><b>過濾</b>:命中的參數自動不勾選(仍可手動測回)。<b>建議</b>:命中時在「建議另測」欄提示這個參數值得測哪類漏洞(候選提示,不影響勾選)。<b>全域</b>對所有專案生效,<b>本專案</b>只對目前專案生效。</p>
       <div class="subtabbar" id="ruleScopeTabs">
         <button class="subtab active" data-scope="global">全域規則</button>
         <button class="subtab" data-scope="project">本專案規則</button>
       </div>
       <div class="rules-add">
+        <select id="rPurpose"><option value="filter">過濾</option><option value="advise">建議</option></select>
         <select id="rKind"><option value="name">依名稱</option><option value="value">依值</option></select>
         <select id="rMode">
           <option value="prefix">開頭是</option><option value="contains">包含</option>
           <option value="equals">等於</option><option value="iequals">等於(不分大小寫)</option>
           <option value="regex">正規表達式</option>
+          <option value="magic">magic(解碼後位元組)</option>
+          <option value="json-key">JSON key</option>
+          <option value="len-mod">長度整除</option>
         </select>
-        <input id="rPattern" placeholder="例:_ga(值以 _ga 開頭)">
+        <input id="rLocation" placeholder="位置(可空=任意):COOKIE/GET/POST…" size="14">
+        <input id="rPattern" placeholder="樣式,例:_ga">
+        <input id="rVulnClass" placeholder="建議類別(建議規則用)" size="16">
         <input id="rNote" placeholder="備註(可空)">
         <button class="btn sm" id="rAdd">新增到全域</button>
       </div>
       <div class="table-scroll">
         <table class="rules-table" id="rulesTable">
-          <thead><tr><th>啟用</th><th>類型</th><th>模式</th><th>樣式</th><th>備註</th><th></th></tr></thead>
+          <thead><tr><th>啟用</th><th>用途</th><th>類型</th><th>模式</th><th>位置</th><th>樣式</th><th>說明</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>

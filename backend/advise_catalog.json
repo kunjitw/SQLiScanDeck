@@ -36,10 +36,10 @@
     "source": "https://github.com/frohoff/ysoserial"
   },
   {
-    "kind": "value", "mode": "prefix", "pattern": "rO0AB", "transform": ["base64decode"],
-    "vuln_class": "Java 反序列化 (magic 確認)",
+    "kind": "value", "mode": "magic", "pattern": "AC ED 00 05", "transform": ["base64decode"],
+    "vuln_class": "Java 反序列化 (magic 位元組確認)",
     "tool": "ysoserial", "confidence": "high",
-    "note": "示範 transform:base64decode 後用 magic 比對解出來的位元組是否為 AC ED 00 05。",
+    "note": "示範 transform + magic:base64decode 後比對解出來的位元組是否為 AC ED 00 05(比 rO0AB 前綴更嚴)。",
     "source": "https://github.com/frohoff/ysoserial"
   },
   {

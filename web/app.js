@@ -1231,6 +1231,21 @@ function _paramAnomaly(p) {
 // Row colour tracks the CHECKBOX (will-be-tested), NOT the auto-skip flag.
 // Auto-skip only sets the INITIAL checked state and moves the param into the
 // SEPARATE "已自動略過" region below the table.
+// Heuristic "worth another test class" hints for one param (candidate, NOT a
+// confirmed finding). Sorted high->low confidence; each chip's tooltip carries the
+// why + recommended tool + source.
+function adviceCellHtml(p) {
+  const adv = p.advice || [];
+  if (!adv.length) return "";
+  const rank = { high: 0, medium: 1, low: 2 };
+  const sorted = adv.slice().sort((a, b) =>
+    (rank[a.confidence] == null ? 3 : rank[a.confidence]) - (rank[b.confidence] == null ? 3 : rank[b.confidence]));
+  return `<div class="adv-hints">` + sorted.map(a => {
+    const conf = a.confidence || "low";
+    const tip = [a.why, a.tool ? "工具:" + a.tool : "", a.source || ""].filter(Boolean).join("\n");
+    return `<span class="advchip conf-${esc(conf)}" title="${esc(tip)}">${esc(a.vuln_class)}</span>`;
+  }).join("") + `</div>`;
+}
 function paramRowHtml(i) {
   const p = state.params[i];
   const anom = _paramAnomaly(p);
@@ -1241,6 +1256,7 @@ function paramRowHtml(i) {
     <td class="val-cell${anom ? " anomaly" : ""}" title="${anom ? esc(anom) : esc(p.value)}">${esc(p.value)}</td>
     <td>${p.filtered ? `<span class="badge skip" title="${esc(p.filter_reason || "")}">自動略過</span>` : ""}</td>
     <td>${priorBadge(p)}</td>
+    <td class="adv-cell">${adviceCellHtml(p)}</td>
   </tr>`;
 }
 function wireParamRows(root) {
@@ -1307,7 +1323,7 @@ function renderParamRegion(box, idxList, cfg) {
      </button>
      <div class="skip-body${collapsed ? " collapsed" : ""}"><div class="skip-body-inner">
        <table class="params">
-         <thead><tr><th></th><th>參數</th><th>位置</th><th>樣本值</th><th>過濾</th><th>過去測試</th></tr></thead>
+         <thead><tr><th></th><th>參數</th><th>位置</th><th>樣本值</th><th>過濾</th><th>過去測試</th><th>建議另測</th></tr></thead>
          <tbody>${idxList.map(paramRowHtml).join("")}</tbody>
        </table>
      </div></div>`;
@@ -2893,18 +2909,27 @@ async function loadRules() {
   const rules = all.filter(r => scope === "global" ? r.project_id == null : r.project_id === state.projectId);
   const tb = $("#rulesTable tbody");
   if (!rules.length) {
-    tb.innerHTML = `<tr><td colspan="6" class="rules-empty">${scope === "global" ? "尚無全域規則" : "本專案尚無自訂規則"};用上方欄位新增。</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="8" class="rules-empty">${scope === "global" ? "尚無全域規則" : "本專案尚無自訂規則"};用上方欄位新增。</td></tr>`;
     return;
   }
-  tb.innerHTML = rules.map(r => `
+  tb.innerHTML = rules.map(r => {
+    const adv = r.purpose === "advise";
+    const purposeBadge = adv ? `<span class="badge tested">建議</span>` : `<span class="badge skip">過濾</span>`;
+    const desc = adv
+      ? `${esc(r.vuln_class || "")}${r.note ? (r.vuln_class ? " · " : "") + esc(r.note) : ""}`
+      : esc(r.note || "");
+    return `
     <tr>
       <td><input type="checkbox" data-toggle="${r.id}" ${r.enabled ? "checked" : ""}></td>
+      <td class="nowrap">${purposeBadge}</td>
       <td class="nowrap">${r.kind === "name" ? "名稱" : "值"}</td>
       <td class="nowrap">${esc(r.mode)}</td>
+      <td class="nowrap">${esc(r.location || "任意")}</td>
       <td class="pname">${esc(r.pattern)}</td>
-      <td>${esc(r.note || "")}</td>
+      <td>${desc}</td>
       <td><button class="link-btn del nowrap" data-del="${r.id}">刪除</button></td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
   $$("[data-toggle]", tb).forEach(cb => cb.onchange = async () => {
     try { await api(`/api/rules/${cb.dataset.toggle}`, "PATCH", { enabled: cb.checked }); }
     catch (e) { cb.checked = !cb.checked; toast("更新失敗:" + e.message, "err"); }  // revert the visual on failure
@@ -2920,9 +2945,20 @@ async function addRule() {
   const pattern = $("#rPattern").value.trim();
   if (!pattern) { toast("請填樣式", "err"); return; }
   const scope = state.ruleScope || "global";
+  const val = id => { const el = $(id); return el ? el.value.trim() : ""; };
   try {
-    await api("/api/rules", "POST", { kind: $("#rKind").value, mode: $("#rMode").value, pattern, note: $("#rNote").value.trim(), project_id: scope === "global" ? null : state.projectId });
-    $("#rPattern").value = ""; $("#rNote").value = ""; loadRules(); toast("已新增規則", "ok");
+    await api("/api/rules", "POST", {
+      kind: $("#rKind").value, mode: $("#rMode").value, pattern,
+      note: $("#rNote").value.trim(),
+      purpose: val("#rPurpose") || "filter",
+      location: val("#rLocation"),
+      vuln_class: val("#rVulnClass"),
+      project_id: scope === "global" ? null : state.projectId,
+    });
+    $("#rPattern").value = ""; $("#rNote").value = "";
+    if ($("#rVulnClass")) $("#rVulnClass").value = "";
+    if ($("#rLocation")) $("#rLocation").value = "";
+    loadRules(); toast("已新增規則", "ok");
   } catch (e) { toast("新增失敗:" + e.message, "err"); }
 }
 
