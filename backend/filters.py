@@ -349,6 +349,13 @@ def apply_filters(params, rules):
     """
     annotated = []
     for p in params:
+        if p.get("is_file"):   # multipart file-upload field: show it, but NEVER SQLi-fuzz it
+            item = dict(p)
+            item["filtered"] = True
+            item["filter_reason"] = "檔案上傳欄位(檔名/內容),不做 SQLi 注入測試(可另行測上傳漏洞)"
+            item["selected"] = False
+            annotated.append(item)
+            continue
         filtered, reason = evaluate(p, rules)
         item = dict(p)
         item["filtered"] = filtered

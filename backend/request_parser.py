@@ -162,7 +162,15 @@ def parse_request(raw, force_ssl=False):
                 except Exception:
                     result["warnings"].append("Content-Type 是 JSON 但解析失敗,已略過 body 參數")
             elif "multipart/form-data" in ctype:
-                result["warnings"].append("multipart 表單暫不自動拆解 body 參數")
+                mp = _parse_multipart(body, result["content_type"])
+                if mp:
+                    params.extend(mp)
+                    nfile = sum(1 for x in mp if x.get("is_file"))
+                    if nfile:
+                        result["warnings"].append(
+                            "multipart:拆出 {} 個欄位,其中 {} 個檔案上傳欄位已標記為不做 SQLi".format(len(mp), nfile))
+                else:
+                    result["warnings"].append("multipart 表單解析失敗(找不到 boundary 或格式異常)")
             else:
                 # default: urlencoded form
                 for name, value in parse_qsl(body, keep_blank_values=True):
@@ -178,6 +186,51 @@ def parse_request(raw, force_ssl=False):
         result["ok"] = False
         result["warnings"].append("解析發生例外:{}".format(e))
         return result
+
+
+def _multipart_boundary(content_type):
+    m = re.search(r'boundary=(?:"([^"]+)"|([^";]+))', content_type or "", re.I)
+    return (m.group(1) or m.group(2)).strip() if m else None
+
+
+def _parse_multipart(body, content_type):
+    """Extract multipart/form-data parts. TEXT fields become testable POST params;
+    parts carrying a filename (file uploads) are flagged is_file so they are SHOWN
+    but skipped from SQLi fuzzing -- and their raw bytes are never surfaced (only a
+    filename/type/size summary). Best-effort: returns [] on any trouble."""
+    boundary = _multipart_boundary(content_type)
+    if not boundary:
+        return []
+    out = []
+    for seg in (body or "").split("--" + boundary):
+        s = seg.strip("\r\n")
+        if not s or s == "--":                       # preamble / closing delimiter
+            continue
+        parts = re.split(r"\r?\n\r?\n", s, maxsplit=1)
+        head = parts[0]
+        content = parts[1] if len(parts) > 1 else ""
+        cd, part_ct = "", ""
+        for hl in head.split("\n"):
+            hl = hl.rstrip("\r")
+            low = hl.lower()
+            if low.startswith("content-disposition:"):
+                cd = hl
+            elif low.startswith("content-type:"):
+                part_ct = hl.split(":", 1)[1].strip()
+        name_m = re.search(r'name="([^"]*)"', cd)
+        if not name_m or not name_m.group(1):
+            continue
+        name = name_m.group(1)
+        file_m = re.search(r'filename="([^"]*)"', cd)   # presence of filename => file field
+        if file_m is not None:
+            fn = file_m.group(1)
+            summary = "檔案上傳:{}{} · {} bytes".format(
+                fn or "(未選檔)", " · " + part_ct if part_ct else "", len(content))
+            out.append({"name": name, "location": "FILE", "value": summary,
+                        "is_file": True, "filename": fn, "part_ctype": part_ct})
+        else:
+            out.append({"name": name, "location": "POST", "value": content.strip("\r\n")})
+    return out
 
 
 def _parse_bare_url(url, result, force_ssl=False):
