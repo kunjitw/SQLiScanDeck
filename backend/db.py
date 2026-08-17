@@ -74,7 +74,7 @@ def init_db():
                 extra_flags TEXT DEFAULT '',
                 restrict_ip TEXT DEFAULT '',
                 note TEXT DEFAULT '',          -- user's free-text note for this run
-                status TEXT NOT NULL,          -- queued|running|done|error|killed|stopped
+                status TEXT NOT NULL,          -- queued|running|done|inconclusive|error|killed|stopped
                 vulnerable INTEGER DEFAULT 0,
                 result_json TEXT,              -- parsed findings
                 log_path TEXT,
@@ -477,7 +477,6 @@ def _param_outcomes(row):
     # renders as clean on multi-param scans.
     vuln = {str(p).split(" (")[0].strip() for p in (res.get("parameters") or [])}
     per = res.get("per_param") or {}
-    status = row.get("status")
     scan_vuln = bool(row.get("vulnerable"))
     out = []
     for p in params:
@@ -485,19 +484,19 @@ def _param_outcomes(row):
             continue
         name = p.get("name")
         pv = per.get(name)
-        # EVIDENCE-BASED, never default-to-clean: 'clean' needs a positive signal (the tool
-        # said so for this param, OR the scan positively completed clean status==done). A
-        # selected param on an errored/killed/half-run scan is 'unknown' (未確認), NOT 無洞.
+        # EVIDENCE-BASED, never default-to-clean: 'clean' needs a per-parameter signal
+        # that named THIS param ("... parameter 'X' does not seem to be injectable"). A
+        # selected param the tool never mentioned -- errored, half-run, or simply not
+        # tested (the URI '#1*' fallback / a cookie at --level 1) -- is 'unknown' (未測),
+        # NOT 無洞. The scan-level status is deliberately NOT used to infer per-param clean.
         if name in vuln or pv == "vulnerable":
             st = "vuln"
         elif pv == "tentative":
             st = "tentative"                       # unresolved tentative -> 疑似, never silently clean
         elif pv == "clean":
             st = "clean"                           # tool explicitly cleared THIS param
-        elif not scan_vuln and status == "done":
-            st = "clean"                           # scan positively completed clean, no per-param verdict
         else:
-            st = "unknown"                         # selected but no evidence + not a clean completion
+            st = "unknown"                         # selected but no per-param evidence -> 未測
         out.append({"n": name, "st": st, "v": st == "vuln"})
     # single-param inference: scan is vulnerable but the tool named no param (common with
     # ghauri) and exactly one param was tested -> that param is the injectable one.

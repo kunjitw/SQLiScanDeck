@@ -1926,6 +1926,7 @@ async function loadScans() {
 const SCAN_FILTERS = [
   { key: "", label: "全部" },
   { key: "vuln", label: "有漏洞" },
+  { key: "inconclusive", label: "測不準" },   // ran but result not trustworthy as 無洞
   { key: "clean", label: "無洞" },
   { key: "running", label: "掃描中" },
   { key: "other", label: "失敗/中止" },   // 'other' = error/stopped(失敗) AND killed(已中止)
@@ -1997,6 +1998,7 @@ async function refreshParamBadges() {
 function scanOutcome(s) {
   if (s.vulnerable) return { key: "vuln", label: "有漏洞", cls: "st-vuln" };
   if (s.status === "running" || s.status === "queued") return { key: "running", label: "掃描中", cls: "st-running" };
+  if (s.status === "inconclusive") return { key: "inconclusive", label: "測不準", cls: "st-inconclusive" };
   if (s.status === "done") return { key: "clean", label: "無洞", cls: "st-clean" };
   if (s.status === "killed") return { key: "other", label: "已中止", cls: "st-other" };
   return { key: "other", label: "失敗", cls: "st-other" };   // error / stopped
@@ -2009,7 +2011,7 @@ function renderScanRow(s) {
   const canStop = s.status === "running" || s.status === "queued";
   const pouts = s.pouts || [];   // tested params (skipped omitted); v = has an injection point
   const pchips = pouts.length
-    ? `<div class="scan-row-params">${pouts.map(po => { const st = po.st || (po.v ? "vuln" : "clean"); const m = { vuln: ["pv", "有注入點"], clean: ["pc", "無注入點"], tentative: ["pt", "疑似(待確認)"], unknown: ["pu", "未確認(未測完)"] }[st] || ["pu", "未確認"]; return `<span class="pchip ${m[0]}" title="${esc(po.n)} · ${m[1]}">${esc(po.n)}</span>`; }).join("")}</div>`
+    ? `<div class="scan-row-params">${pouts.map(po => { const st = po.st || (po.v ? "vuln" : "unknown"); const m = { vuln: ["pv", "有注入點"], clean: ["pc", "無注入點"], tentative: ["pt", "疑似(待確認)"], unknown: ["pu", "未測(無此參數證據)"] }[st] || ["pu", "未測"]; return `<span class="pchip ${m[0]}" title="${esc(po.n)} · ${m[1]}">${esc(po.n)}</span>`; }).join("")}</div>`
     : "";
   return `<div class="scan-row st-${st} ${s.id === state.detailId ? "active" : ""}${s.id === state.flashScanId ? " flash-target" : ""}" data-id="${s.id}">
     ${stateChip(s)}
@@ -2050,16 +2052,18 @@ function splitEndpoint(s) {
   return { host: host || "(未知主機)", ep: method + " " + path };
 }
 // A node's colour encodes the WORST state among its scans:
-//   vuln(red) > running(orange) > clean/done(green) > other:error/killed(grey) > untested(grey)
+//   vuln(red) > running(orange) > inconclusive/測不準(violet) > clean/無洞(green) > other:error/killed(grey) > untested(grey)
 // This is the single "severity" axis. The current-searched path is shown on a
-// SEPARATE axis (the accent connector line) so the two never clash.
+// SEPARATE axis (the accent connector line) so the two never clash. inconclusive
+// ranks ABOVE clean so a node holding any 測不準 scan never shows solid green.
 function scanState(s) {
   if (s.vulnerable) return "vuln";
   if (s.status === "running" || s.status === "queued") return "running";
+  if (s.status === "inconclusive") return "inconclusive";
   if (s.status === "done") return "clean";
   return "other"; // error / killed / stopped
 }
-const STATE_RANK = { vuln: 0, running: 1, clean: 2, other: 3, untested: 4 };
+const STATE_RANK = { vuln: 0, running: 1, inconclusive: 2, clean: 3, other: 4, untested: 5 };
 function worstOf(states) {
   let best = "untested";
   for (const s of states) if (STATE_RANK[s] < STATE_RANK[best]) best = s;
@@ -2332,9 +2336,10 @@ function _paramOutcome(p, f, scanVuln, scanDone) {
   if (vulnNames.indexOf(p.name) >= 0 || pp[p.name] === "vulnerable") return { label: "有漏洞", cls: "st-vuln" };
   if (pp[p.name] === "clean") return { label: "無洞", cls: "st-clean" };            // tool said clean for THIS param
   if (pp[p.name] === "tentative") return { label: "疑似", cls: "st-tent" };          // tool's tentative, unconfirmed
-  if (!scanVuln && scanDone) return { label: "無洞", cls: "st-clean" };              // scan positively completed clean
-  if (!scanVuln && !scanDone) return { label: "未確認", cls: "st-other" };           // errored/killed/half-run -> NOT 無洞
-  return { label: "已測", cls: "st-other" };   // scan vulnerable elsewhere, this one inconclusive
+  // No per-param evidence NAMED this param -> 未測, never a groundless 無洞. Covers a
+  // param the tool skipped (cookie at --level 1), the URI '#1*' fallback, and any
+  // errored/half-run scan. The scan-level status is deliberately NOT used to infer clean.
+  return { label: "未測", cls: "st-untested" };
 }
 function _reqSummaryHtml(s) {
   const { host, ep } = splitEndpoint(s);
@@ -2373,7 +2378,7 @@ function _paramsVerdictHtml(s) {
   const scanVuln = !!s.vulnerable;
   const scanDone = s.status === "done";
   const ev = _scanEvidence();
-  const order = { "st-vuln": 0, "st-tent": 1, "st-clean": 2, "st-other": 3, "st-skip": 4 };
+  const order = { "st-vuln": 0, "st-tent": 1, "st-clean": 2, "st-untested": 3, "st-other": 4, "st-skip": 5 };
   const rows = params.map(p => ({ p, oc: _paramOutcome(p, f, scanVuln, scanDone) }));
   // ghauri often reports an injection WITHOUT naming the parameter; if the scan is
   // vulnerable, nothing got attributed, and exactly one param was tested, that param
@@ -2387,8 +2392,8 @@ function _paramsVerdictHtml(s) {
     else if (oc.cls === "st-clean") evidence = "無注入點";
     else if (oc.cls === "st-tent") evidence = "工具暫定疑似,尚未確認";
     else if (oc.cls === "st-skip") evidence = "未勾選,本次未測試";
-    else if (oc.label === "未確認") evidence = "掃描未完成,此參數未實際測完(非無洞)";
-    else evidence = "已測,此參數無定論";
+    else if (oc.cls === "st-untested") evidence = "工具日誌未提及此參數,未取得證據(非無洞)";
+    else evidence = "無定論";
     return `<div class="pv-row ${oc.cls}"><span class="state-chip ${oc.cls}">${oc.label}</span>`
       + `<span class="pv-name">${esc(p.name)}</span><span class="loc-chip">${esc(p.location || "?")}</span>`
       + `<span class="pv-val" title="${esc(p.value || "")}">${esc(p.value || "")}</span>`

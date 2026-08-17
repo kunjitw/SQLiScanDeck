@@ -226,6 +226,89 @@ def caveats(log_text):
     return [{"marker": m, "note": note} for m, note in _CAVEAT_MARKERS if m in low]
 
 
+# The subset of caveats SEVERE enough to invalidate a "clean" verdict: the run
+# never got a usable baseline (base request errored), drowned in HTTP errors, or
+# lost the connection. When one is present, a "nothing injectable" result is NOT
+# trustworthy -> the scan is 測不準 (inconclusive), not 無洞. Milder caveats
+# (e.g. "content is not stable") stay informational: sqlmap still tests via the
+# sequence matcher, so they don't by themselves void the result.
+_SEVERE_CAVEAT_MARKERS = (
+    ("responded with an http error code", "基準請求就收到 HTTP 錯誤碼,無法建立可靠的比較基準"),
+    ("http error codes detected during run", "掃描期間出現大量 HTTP 錯誤碼,回應無法可靠比較"),
+    ("continuous problem with connection to the target", "與目標連線持續有問題,結果不可靠"),
+)
+
+
+def severe_reliability(log_text):
+    """(marker, note) for the first SEVERE reliability problem that makes a
+    'clean' verdict untrustworthy, else (None, None)."""
+    low = (log_text or "").lower()
+    for marker, note in _SEVERE_CAVEAT_MARKERS:
+        if marker in low:
+            return marker, note
+    return None, None
+
+
+def _tested_param_names(findings):
+    """Bare names of params the tool actually produced per-parameter EVIDENCE for
+    (an explicit clean/vulnerable/tentative verdict, or an injection-point line).
+    These are the only names we have per-target evidence about."""
+    per = (findings or {}).get("per_param") or {}
+    names = set(per.keys())
+    for p in (findings or {}).get("parameters") or []:
+        names.add(str(p).split(" (")[0].strip())
+    return names
+
+
+def clean_covers_selected(selected_names, findings):
+    """True only if the tool's per-parameter evidence covers what the USER chose
+    to test. Without this, a "nothing injectable" line about the URL path ('#1*')
+    or a param the tool silently skipped (e.g. a Cookie at --level 1) would be
+    mistaken for 'the selected params are clean'. With no selected params (a bare
+    URL), any tested point (e.g. the URI itself) counts as coverage."""
+    tested = _tested_param_names(findings)
+    sel = list(selected_names or [])
+    if sel:
+        return all(n in tested for n in sel)
+    return bool(tested)
+
+
+def decide_status(returncode, vulnerable, clean_hit, selected_names, findings, log_text):
+    """Single source of truth for a scan's terminal status, shared by both
+    engines so sqlmap and ghauri never diverge. Evidence-based:
+      - vulnerable       -> 'done'  (the red verdict rides the `vulnerable` flag)
+      - never really ran -> 'error' (rc != 0, or no positive 'nothing injectable' signal)
+      - ran but the "clean" can't be trusted -> 'inconclusive' (測不準):
+          * a SEVERE reliability problem (HTTP-error storm / base request errored /
+            persistent connection failure), OR
+          * a coverage gap: the selected params were never actually tested
+      - ran clean, reliably, covering the selected params -> 'done' (無洞/green)
+    """
+    if vulnerable:
+        return "done"
+    if returncode != 0 or not clean_hit:
+        return "error"
+    if severe_reliability(log_text)[0] is not None:
+        return "inconclusive"
+    if not clean_covers_selected(selected_names, findings):
+        return "inconclusive"
+    return "done"
+
+
+def inconclusive_reason(selected_names, findings, log_text):
+    """Human note explaining WHY a scan came out 測不準, for the 【判定】 block."""
+    _m, note = severe_reliability(log_text)
+    if note:
+        return note
+    tested = _tested_param_names(findings)
+    missing = [n for n in (selected_names or []) if n not in tested]
+    if missing:
+        return "所選參數未被實際測試(工具日誌未對其下任何結論):" + "、".join(missing)
+    if not list(selected_names or []):
+        return "沒有可測的參數,未取得任何逐參數結論"
+    return "未取得足夠證據可判定為「無洞」"
+
+
 def per_param_verdicts(log_text):
     """Explicit per-parameter verdicts, keyed by param NAME: {name: 'vulnerable'|'clean'}.
     Precedence (weak -> strong): a merely TENTATIVE "appears to be ... injectable" is
@@ -354,7 +437,8 @@ def extract_findings(log_text):
 
 def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
                    status, returncode, fail_marker, fail_line,
-                   clean_hit, waf_marker, findings, recorded_history):
+                   clean_hit, waf_marker, findings, recorded_history,
+                   inconclusive_note=None):
     """Emit a compact, machine-parseable 【判定】 block that explains HOW the app
     judged this scan: each conclusion + the exact evidence it rests on. MUST be
     called AFTER the verdict is computed from read_log(), so quoting an English
@@ -370,7 +454,11 @@ def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
         if vuln_line:
             L("【判定】  依據行:{}".format(vuln_line))
     elif status == "done":
-        L("【判定】有漏洞:否 ← 已測完所有參數、命中「無可注入」完成訊號")
+        L("【判定】有漏洞:否 ← 已測完所選參數、命中「無可注入」完成訊號")
+    elif status == "inconclusive":
+        L("【判定】有漏洞:測不準 ← 雖有「無可注入」訊號,但結果不可信,不能當作「無洞」")
+        if inconclusive_note:
+            L("【判定】  原因:{}".format(inconclusive_note))
     else:
         L("【判定】有漏洞:無法判定 ← 掃描未正常完成或未出現「無可注入」完成訊號(狀態:{}),此結果不代表「無洞」".format(status))
 
@@ -385,6 +473,9 @@ def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
             L("【判定】  依據行:{}".format(fail_line))
     elif status == "error":
         L("【判定】狀態:error ← returncode=0,但未出現「測試完成」訊號(疑似連線/SSL 失敗或掃描中斷)—— 目標未實際測完,不能當作「無洞」")
+    elif status == "inconclusive":
+        L("【判定】狀態:inconclusive(測不準)← returncode={}、有「無可注入」訊號,但{}".format(
+            returncode, inconclusive_note or "結果不可信"))
     elif clean_hit:
         L("【判定】狀態:done ← returncode={}、命中「已測完但無可注入參數」完成訊號".format(returncode))
     elif fail_marker:

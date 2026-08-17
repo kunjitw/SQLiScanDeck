@@ -25,6 +25,7 @@
   --danger: #ff453a; --danger-soft: rgba(255,69,58,0.14);
   --ok: #30d158; --ok-soft: rgba(48,209,88,0.12);
   --warn: #ff9f0a; --warn-soft: rgba(255,159,10,0.14);
+  --inconclusive: #bf5af2; --inconclusive-soft: rgba(191,90,242,0.16);
   --code-bg: #0a0b0d; --header-bg: rgba(0,0,0,0.72);
 }
 :root[data-theme="light"] {
@@ -36,6 +37,7 @@
   --danger: #d70015; --danger-soft: rgba(215,0,21,0.10);
   --ok: #248a3d; --ok-soft: rgba(36,138,61,0.10);
   --warn: #b25000; --warn-soft: rgba(178,80,0,0.10);
+  --inconclusive: #7c3aed; --inconclusive-soft: rgba(124,58,237,0.12);
   --code-bg: #f2f2f4; --header-bg: rgba(255,255,255,0.72);
 }
 @media (prefers-color-scheme: light) {
@@ -48,6 +50,7 @@
     --danger: #d70015; --danger-soft: rgba(215,0,21,0.10);
     --ok: #248a3d; --ok-soft: rgba(36,138,61,0.10);
     --warn: #b25000; --warn-soft: rgba(178,80,0,0.10);
+    --inconclusive: #7c3aed; --inconclusive-soft: rgba(124,58,237,0.12);
     --code-bg: #f2f2f4; --header-bg: rgba(255,255,255,0.72);
   }
 }
@@ -197,6 +200,7 @@ header.glass {
 .fc-dot.st-vuln { background: var(--danger); }
 .fc-dot.st-clean { background: var(--ok); }
 .fc-dot.st-running { background: var(--warn); }
+.fc-dot.st-inconclusive { background: var(--inconclusive); }
 .fc-dot.st-other { background: var(--fg-soft); }
 .fc-count { font-family: var(--font-mono); font-size: 0.64rem; color: var(--fg-dim); background: var(--bg-soft); border-radius: var(--radius-pill); padding: 0 0.34rem; min-width: 1.1rem; text-align: center; }
 .filter-chip.active .fc-count { color: var(--accent); background: var(--bg-elev); }
@@ -568,6 +572,7 @@ table tr:last-child td { border-bottom: none; }
 .scan-row.st-vuln { border-left-color: var(--danger); }
 .scan-row.st-running { border-left-color: var(--warn); }
 .scan-row.st-clean { border-left-color: var(--ok); }
+.scan-row.st-inconclusive { border-left-color: var(--inconclusive); }
 .scan-row.st-other { border-left-color: var(--fg-soft); }
 .row-del { flex-shrink: 0; font: inherit; font-size: 0.72rem; padding: 0.15rem 0.42rem; border-radius: var(--radius-xs); border: 1px solid var(--border-strong); background: transparent; color: var(--fg-dim); cursor: pointer; opacity: 0; transition: opacity var(--dur-fast), color var(--dur-fast); }
 .scan-row:hover .row-del { opacity: 1; }
@@ -633,6 +638,8 @@ table tr:last-child td { border-bottom: none; }
 .pv-row.st-vuln  { border-left-color: var(--danger); }
 .pv-row.st-clean { border-left-color: var(--ok); }
 .pv-row.st-skip  { border-left-color: var(--fg-dim); opacity: 0.72; }
+.pv-row.st-untested { border-left-color: var(--fg-soft); }
+.pv-row.st-untested .pv-ev { color: var(--fg-dim); }
 .pv-row.st-other { border-left-color: var(--fg-soft); }
 .pv-row.st-tent { border-left-color: var(--warn); }
 .pv-row.st-tent .pv-ev { color: var(--warn); }
@@ -705,7 +712,8 @@ table tr:last-child td { border-bottom: none; }
 .state-chip.st-vuln { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
 .state-chip.st-clean { color: var(--ok); background: var(--ok-soft); border-color: var(--ok); }
 .state-chip.st-running { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
-.state-chip.st-other { color: var(--fg-dim); background: var(--bg-soft); border-color: var(--border-strong); }
+.state-chip.st-inconclusive { color: var(--inconclusive); background: var(--inconclusive-soft); border-color: var(--inconclusive); }
+.state-chip.st-other, .state-chip.st-untested { color: var(--fg-dim); background: var(--bg-soft); border-color: var(--border-strong); }
 .state-chip.st-tent { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
 .state-chip.st-skip { color: var(--fg-dim); background: transparent; border-color: var(--border); min-width: 0; }
 /* verdict headline: the single conclusion */
@@ -718,6 +726,8 @@ table tr:last-child td { border-bottom: none; }
 .vd-headline.st-clean .vd-hl-label { color: var(--ok); }
 .vd-headline.st-running { background: var(--warn-soft); border-color: var(--warn); }
 .vd-headline.st-running .vd-hl-label { color: var(--warn); }
+.vd-headline.st-inconclusive { background: var(--inconclusive-soft); border-color: var(--inconclusive); }
+.vd-headline.st-inconclusive .vd-hl-label { color: var(--inconclusive); }
 .vd-headline.st-other .vd-hl-label { color: var(--fg-dim); }
 /* read-only detail: section titles + per-param results table */
 .sd-sec-title { font-weight: 700; font-size: 0.85rem; margin: 0.8rem 0 0.4rem; color: var(--fg); }
@@ -830,6 +840,7 @@ table tr:last-child td { border-bottom: none; }
 .trow.st-untested .tdot { background: var(--fg-dim); }
 .trow.st-other    .tdot { background: var(--fg-soft); }
 .trow.st-clean    .tdot { background: var(--ok); }
+.trow.st-inconclusive .tdot { background: var(--inconclusive); box-shadow: 0 0 6px var(--inconclusive); }
 .trow.st-running  .tdot { background: var(--warn); box-shadow: 0 0 6px var(--warn); animation: pulse 1.6s var(--ease-standard) infinite; }
 .trow.st-vuln     .tdot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
 .trow.st-vuln .tep-label, .trow.st-vuln .thost-name { color: var(--danger); }

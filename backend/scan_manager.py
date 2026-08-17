@@ -130,11 +130,12 @@ class ScanContext:
             ended_at=ended,
             duration_ms=ended - started,
         )
-        # A clean completion tells us about every tested param; separately, a
-        # CONFIRMED vuln must be recorded even if the run then errored/was killed
-        # (never lose a real injection). A killed/error scan with NO vuln records
+        # Record per-param history on any completion we drew evidence from: a clean
+        # 'done', an 'inconclusive' run (records ONLY the params the tool actually
+        # judged -- see below), or any CONFIRMED vuln even if the run then errored/was
+        # killed (never lose a real injection). A killed/error scan with NO vuln records
         # nothing, so it can't poison the dedup history with false negatives.
-        if status == "done" or vulnerable:
+        if status in ("done", "inconclusive") or vulnerable:
             return self._record_param_history(vulnerable, findings)
         return None
 
@@ -155,19 +156,25 @@ class ScanContext:
                 except Exception:
                     pass
                 continue
-            # Precise per-param verdict:
+            # EVIDENCE-ONLY per-param verdict -- a param is coloured only from a log
+            # line that NAMED it:
             #  - in the injection summary OR explicit "is vulnerable" -> vulnerable
-            #  - explicit "not injectable", OR the whole scan found nothing and ran
-            #    to completion (so every selected param really was tested) -> clean
-            #  - otherwise a vuln was found in ANOTHER param; with --batch the tool
-            #    answers "keep testing others? N" and stops, so THIS param may not
-            #    have been tested -> 'tested' (inconclusive), never a false 'clean'.
+            #  - explicit "does not seem to be injectable"           -> clean
+            #  - explicit tentative "appears to be ... injectable"   -> 'tested' (疑似,未定案)
+            #  - NO line mentioned this param                        -> record nothing
+            # The last case is the fix: a scan that only tested the URI '#1*' (or
+            # skipped cookies at --level 1) leaves those selected params with no row,
+            # so they stay 未測 instead of being painted a groundless 'clean'. The old
+            # `or not vulnerable` fallback (which greened every selected param on any
+            # non-vuln completion) is deliberately gone.
             if name in summary_vuln or explicit.get(name) == "vulnerable":
                 status, is_vuln = "vulnerable", True
-            elif explicit.get(name) == "clean" or not vulnerable:
+            elif explicit.get(name) == "clean":
                 status, is_vuln = "clean", False
-            else:
+            elif explicit.get(name) == "tentative":
                 status, is_vuln = "tested", False
+            else:
+                continue
             try:
                 # latest aggregate (drives the parse-screen badges)
                 db.upsert_param_status(

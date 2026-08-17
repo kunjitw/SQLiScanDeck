@@ -207,20 +207,24 @@ def run(ctx):
         # the vulnerable flag regardless.
         fail_marker, fail_line = base.fail_evidence(log_text)
         clean_hit = base.looks_clean(log_text)
-        # A non-vuln result is trustworthy ONLY if the tool POSITIVELY reported
-        # "tested everything, nothing injectable" (clean_hit). rc!=0, OR (no vuln AND
-        # no clean signal) => the target was never really tested (dead / blocked /
-        # SSL / connection error -- listed in _FAILURE_MARKERS or not) => error, so we
-        # NEVER record a groundless "no vuln". fail_marker is now only for NAMING why.
-        failed = (rc != 0) or (not vulnerable and not clean_hit)
-        status = "error" if failed else "done"
+        selected_names = [p["name"] for p in getattr(ctx, "params", []) if p.get("selected")]
+        # Evidence-based terminal status (shared by both engines via base.decide_status):
+        # green 無洞 ONLY when the run reliably tested the SELECTED params and found
+        # nothing. A clean signal amid an HTTP-error storm, or one that never covered
+        # the selected params (e.g. cookies at --level 1, or the URI '#1*' fallback),
+        # becomes 'inconclusive' (測不準) -- never a groundless 無洞. rc!=0 or no clean
+        # signal at all is still 'error'.
+        status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text)
+        inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text)
+                             if status == "inconclusive" else None)
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
         base.append_verdict(ctx, tool="sqlmap", vulnerable=vulnerable,
                             vuln_marker=vuln_marker, vuln_line=vuln_line,
                             status=status, returncode=rc,
                             fail_marker=fail_marker, fail_line=fail_line,
                             clean_hit=clean_hit, waf_marker=waf_marker,
-                            findings=findings, recorded_history=recorded)
+                            findings=findings, recorded_history=recorded,
+                            inconclusive_note=inconclusive_note)
 
 
 def _drain(q, ctx):

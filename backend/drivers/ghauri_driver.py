@@ -232,18 +232,22 @@ def run(ctx):
         # a found vuln is preserved via the vulnerable flag regardless.
         fail_marker, fail_line = base.fail_evidence(log_text)
         clean_hit = base.looks_clean(log_text)
-        # trustworthy "no vuln" REQUIRES the positive "tested, nothing injectable"
-        # signal; no vuln + no clean signal => never really tested => error (see the
-        # sqlmap driver for the full rationale). Never record a groundless "no vuln".
-        failed = (rc != 0) or (not vulnerable and not clean_hit)
-        status = "error" if failed else "done"
+        selected_names = [p["name"] for p in getattr(ctx, "params", []) if p.get("selected")]
+        # Evidence-based terminal status, shared with sqlmap via base.decide_status so
+        # the two engines never diverge: green 無洞 only on a reliable run that covered
+        # the selected params; a clean signal amid an error storm or without coverage
+        # becomes 'inconclusive' (測不準); rc!=0 or no clean signal at all stays 'error'.
+        status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text)
+        inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text)
+                             if status == "inconclusive" else None)
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
         base.append_verdict(ctx, tool="ghauri", vulnerable=vulnerable,
                             vuln_marker=vuln_marker, vuln_line=vuln_line,
                             status=status, returncode=rc,
                             fail_marker=fail_marker, fail_line=fail_line,
                             clean_hit=clean_hit, waf_marker=waf_marker,
-                            findings=findings, recorded_history=recorded)
+                            findings=findings, recorded_history=recorded,
+                            inconclusive_note=inconclusive_note)
 
 
 def _drain(q, ctx):
