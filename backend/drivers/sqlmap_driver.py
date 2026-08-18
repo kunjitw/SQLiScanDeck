@@ -211,15 +211,19 @@ def run(ctx):
         # the vulnerable flag regardless.
         fail_marker, fail_line = base.fail_evidence(log_text)
         clean_hit = base.looks_clean(log_text)
-        selected_names = [p["name"] for p in getattr(ctx, "params", []) if p.get("selected")]
+        # coverage LHS must be the exact set sent to -p: base.selected_names drops file /
+        # non-testable fields, so a 'selected' file field can't force a false 測不準.
+        # had_selection guards the "user selected ONLY non-testable fields" edge.
+        selected_names = base.selected_names(getattr(ctx, "params", []))
+        had_selection = any(p.get("selected") for p in getattr(ctx, "params", []))
         # Evidence-based terminal status (shared by both engines via base.decide_status):
         # green 無洞 ONLY when the run reliably tested the SELECTED params and found
         # nothing. A clean signal amid an HTTP-error storm, or one that never covered
         # the selected params (e.g. cookies at --level 1, or the URI '#1*' fallback),
         # becomes 'inconclusive' (測不準) -- never a groundless 無洞. rc!=0 or no clean
         # signal at all is still 'error'.
-        status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text)
-        inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text)
+        status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text, had_selection)
+        inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text, had_selection)
                              if status == "inconclusive" else None)
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
         base.append_verdict(ctx, tool="sqlmap", vulnerable=vulnerable,

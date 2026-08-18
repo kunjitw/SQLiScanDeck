@@ -235,13 +235,17 @@ def run(ctx):
         # a found vuln is preserved via the vulnerable flag regardless.
         fail_marker, fail_line = base.fail_evidence(log_text)
         clean_hit = base.looks_clean(log_text)
-        selected_names = [p["name"] for p in getattr(ctx, "params", []) if p.get("selected")]
+        # coverage LHS must be the exact set sent to -p: base.selected_names drops file /
+        # non-testable fields, so a 'selected' file field can't force a false 測不準.
+        # had_selection guards the "user selected ONLY non-testable fields" edge.
+        selected_names = base.selected_names(getattr(ctx, "params", []))
+        had_selection = any(p.get("selected") for p in getattr(ctx, "params", []))
         # Evidence-based terminal status, shared with sqlmap via base.decide_status so
         # the two engines never diverge: green 無洞 only on a reliable run that covered
         # the selected params; a clean signal amid an error storm or without coverage
         # becomes 'inconclusive' (測不準); rc!=0 or no clean signal at all stays 'error'.
-        status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text)
-        inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text)
+        status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text, had_selection)
+        inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text, had_selection)
                              if status == "inconclusive" else None)
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
         base.append_verdict(ctx, tool="ghauri", vulnerable=vulnerable,

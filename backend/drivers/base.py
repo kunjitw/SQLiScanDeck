@@ -149,6 +149,11 @@ _PP_CONFIRMED_RES = (
 # TENTATIVE: "appears to be '...' injectable" -- provisional, may be retracted (below).
 _PP_TENTATIVE_RE = re.compile(r"parameter '([^']+)' appears to be '[^']*' injectable", re.I)
 _PP_CLEAN_RE = re.compile(r"parameter '([^']+)' does not seem to be injectable", re.I)
+# The ONE line both engines print for every param they actually fuzz -- emitted BEFORE
+# the verdict, for clean AND vulnerable outcomes, and never for a param they skip (place/
+# level gates, --skip, anti-CSRF, is_file all `continue` before it). Our definitive
+# "was actually tested" oracle (sqlmap controller.py:604, ghauri ghauri.py:704).
+_PP_TESTED_RE = re.compile(r"testing for SQL injection on .*?parameter '([^']+)'", re.I)
 
 # bonus non-SQLi heuristic findings sqlmap surfaces during a SQLi run
 _XSS_RE = re.compile(r"parameter '([^']+)' might be vulnerable to cross-site scripting", re.I)
@@ -282,30 +287,43 @@ def severe_reliability(log_text):
 
 
 def _tested_param_names(findings):
-    """Bare names of params the tool actually produced per-parameter EVIDENCE for
-    (an explicit clean/vulnerable/tentative verdict, or an injection-point line).
-    These are the only names we have per-target evidence about."""
+    """Bare names of params the tool actually produced per-parameter EVIDENCE for:
+    an explicit clean/vulnerable/tentative verdict, a confirmed injection point, OR the
+    "testing for SQL injection on ... parameter X" START line (findings['tested']) that
+    both engines print for every param they fuzz. SAFETY: this is only ever consulted
+    (via clean_covers_selected) once clean_hit is true, and both engines emit the
+    "do not appear to be injectable" aggregate that sets clean_hit ONLY after the whole
+    per-param loop finishes -- so a START line here always has its matching conclusion,
+    and a skipped param has neither. Don't consult it in a path where clean_hit isn't
+    already established, or a half-tested START could masquerade as covered."""
     per = (findings or {}).get("per_param") or {}
     names = set(per.keys())
+    names.update((findings or {}).get("tested") or [])
     for p in (findings or {}).get("parameters") or []:
         names.add(str(p).split(" (")[0].strip())
     return names
 
 
-def clean_covers_selected(selected_names, findings):
+def clean_covers_selected(selected_names, findings, had_selection=False):
     """True only if the tool's per-parameter evidence covers what the USER chose
     to test. Without this, a "nothing injectable" line about the URL path ('#1*')
     or a param the tool silently skipped (e.g. a Cookie at --level 1) would be
-    mistaken for 'the selected params are clean'. With no selected params (a bare
-    URL), any tested point (e.g. the URI itself) counts as coverage."""
+    mistaken for 'the selected params are clean'.
+
+    `selected_names` must already be the TESTABLE set (base.selected_names -- file/
+    non-testable fields removed). `had_selection` says whether the user selected
+    anything at all: a genuine bare-URL scan (had_selection False) lets any tested
+    point count, but a scan where the user DID select params that all dropped as
+    non-testable (e.g. only a file-upload field) has an untested intended target and
+    must NOT be called covered."""
     tested = _tested_param_names(findings)
     sel = list(selected_names or [])
     if sel:
         return all(n in tested for n in sel)
-    return bool(tested)
+    return False if had_selection else bool(tested)
 
 
-def decide_status(returncode, vulnerable, clean_hit, selected_names, findings, log_text):
+def decide_status(returncode, vulnerable, clean_hit, selected_names, findings, log_text, had_selection=False):
     """Single source of truth for a scan's terminal status, shared by both
     engines so sqlmap and ghauri never diverge. Evidence-based:
       - vulnerable       -> 'done'  (the red verdict rides the `vulnerable` flag)
@@ -322,12 +340,12 @@ def decide_status(returncode, vulnerable, clean_hit, selected_names, findings, l
         return "error"
     if severe_reliability(log_text)[0] is not None:
         return "inconclusive"
-    if not clean_covers_selected(selected_names, findings):
+    if not clean_covers_selected(selected_names, findings, had_selection):
         return "inconclusive"
     return "done"
 
 
-def inconclusive_reason(selected_names, findings, log_text):
+def inconclusive_reason(selected_names, findings, log_text, had_selection=False):
     """Human note explaining WHY a scan came out 測不準, for the 【判定】 block."""
     _m, note = severe_reliability(log_text)
     if note:
@@ -336,6 +354,8 @@ def inconclusive_reason(selected_names, findings, log_text):
     missing = [n for n in (selected_names or []) if n not in tested]
     if missing:
         return "所選參數未被實際測試(工具日誌未對其下任何結論):" + "、".join(missing)
+    if had_selection and not list(selected_names or []):
+        return "所選欄位皆不可測 SQLi(例如檔案上傳欄位),未實際測試"
     if not list(selected_names or []):
         return "沒有可測的參數,未取得任何逐參數結論"
     return "未取得足夠證據可判定為「無洞」"
@@ -461,6 +481,7 @@ def extract_findings(log_text):
     findings["heuristic_sqli"] = sorted({m.group(1) for m in _HEUR_SQLI_RE.finditer(text)})
 
     findings["per_param"] = per_param_verdicts(text)
+    findings["tested"] = sorted({m.group(1) for m in _PP_TESTED_RE.finditer(text)})  # actually-fuzzed params
     findings["heuristic_xss"] = sorted({m.group(1) for m in _XSS_RE.finditer(text)})
     findings["heuristic_fi"] = sorted({m.group(1) for m in _FI_RE.finditer(text)})
     findings["caveats"] = caveats(text)
