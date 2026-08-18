@@ -30,6 +30,16 @@ __pycache__/
 venv/
 .env
 
+# ── uv self-contained runtime (all created INSIDE the project by start.bat) ──
+# Large + machine-specific, so not source. uv.lock and requirements.txt ARE
+# tracked (they make these reproducible) -- do NOT add them here.
+#   .tools/          = uv.exe (downloaded once, no system install)
+#   .python-managed/ = uv-managed CPython
+#   .uv-cache/       = uv package cache (self-contained strategy)
+/.tools/
+/.python-managed/
+/.uv-cache/
+
 # ── Archives / backups (never commit a zip of the project) ──
 *.zip
 *.7z

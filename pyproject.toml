@@ -1,0 +1,44 @@
+[project]
+name = "sqliscandeck"
+version = "1.0.0"
+description = "Local web UI orchestrating sqlmap + ghauri for authorized SQL injection testing."
+readme = "README.md"
+license = "AGPL-3.0-only"
+authors = [{ name = "kunjitw" }]
+requires-python = ">=3.11"
+dependencies = [
+    # backend web app
+    "fastapi",
+    "uvicorn",
+    # ghauri is run FROM SOURCE (it is not on PyPI), but the backend launches it with
+    # this same interpreter -- so ghauri's own runtime libraries must be importable here.
+    # See backend/ghauri_launch.py, which lists exactly these. sqlmap needs none (it
+    # vendors its own thirdparty/).
+    "tldextract",
+    "colorama",
+    "requests",
+    "chardet",
+    "ua_generator",
+]
+
+# `uv run backend` (and, for colleagues, an editable `pip install -e .`) launches the
+# existing entry point. backend/app.py already inserts its own dir into sys.path at
+# import time, so its flat imports (import config, from drivers import base) keep working
+# untouched -- we only had to make `app` importable, via the wheel source root below.
+[project.scripts]
+backend = "app:main"
+
+[project.urls]
+Homepage = "https://github.com/kunjitw/SQLiScanDeck"
+Repository = "https://github.com/kunjitw/SQLiScanDeck"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Treat backend/ as the source root: backend/app.py -> module `app`, etc. An editable
+# install (uv's default for the project) puts backend/ on sys.path without copying, so
+# data/, web/ and tools/ still resolve at runtime relative to backend/app.py's real path.
+only-include = ["backend"]
+sources = ["backend"]

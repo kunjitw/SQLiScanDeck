@@ -8,21 +8,22 @@ SQLiScanDeck is a local web UI for the sqlmap and ghauri command-line tools. Pas
 
 > ⚠️ Only test targets you have written authorization for. Unauthorized scanning may be illegal, and the responsibility is yours. This is a local tool: it binds to `127.0.0.1` by default and has no built-in login. Never upload `data/` — it holds real requests and cookies.
 
-Requirements: Windows 10/11. The first `bootstrap` needs internet to download. It never touches your system Python.
+Requirements: Windows 10/11. The first launch needs internet. It never touches your system Python.
 
 ## Install
 
-1. First time: connect to the internet and double-click `bootstrap.bat`. It downloads an embedded Python, sqlmap, and ghauri. You only do this once.
-2. Every time after: double-click `start.bat`. It opens your browser at `http://127.0.0.1:8776`.
+**Just double-click `start.bat`.** The first run connects to the internet and installs [uv](https://docs.astral.sh/uv/), a dedicated Python, the dependencies, and sqlmap/ghauri — all inside the project folder (first run only) — then opens your browser at `http://127.0.0.1:8776`.
 
-You can copy the whole folder to another machine that has already been bootstrapped and just run `start.bat`. Scan history and tabs live in `data/`, so they move with the folder.
+- **Fully self-contained**: everything lives in the folder. It never changes your system or PATH. Delete the folder = zero residue.
+- **Move to another machine**: copy the whole folder (including `uv.lock`); `start.bat` restores the exact same environment from the lock. Scan history and tabs live in `data/`, so they move with the folder.
+- **Intranet / no GitHub access**: see "Manual install" below.
 
 ## Try it
 
 The project ships a practice target so you can do a full run with zero risk.
 
 ```
-python testlab\vuln_server.py          # deliberately vulnerable target, binds to 127.0.0.1:5000
+uv run python testlab\vuln_server.py   # deliberately vulnerable target, binds to 127.0.0.1:5000
 ```
 
 In the UI, paste `http://127.0.0.1:5000/product?id=1`, pick a tool, and press Start scan. After a few seconds the queue turns red (vulnerable); open it to see the live log, the evidence behind the verdict, and the payload.
@@ -105,7 +106,7 @@ Image export: drag to select rows, toggle colors, edit, then save as PNG or copy
 <summary>🏗️ Architecture</summary>
 
 ```
-backend/   FastAPI backend, runs on the embedded Python
+backend/   FastAPI backend, runs on the uv-created .venv
   app.py            API routes, static frontend, /api/preview command preview, loopback gate
   scan_manager.py   concurrency queue, live log streaming, persistence, force-stop and delete
   drivers/          sqlmap / ghauri drivers; build_args is the single source of the command
@@ -113,7 +114,8 @@ backend/   FastAPI backend, runs on the embedded Python
   request_parser.py / filters.py / signature.py / ip_utils.py / config.py
 web/       single-page frontend (index.html / style.css / app.js, no framework)
 testlab/   vuln_server.py and vuln_mysql_server.py, two practice targets, bound to 127.0.0.1
-python/    embedded portable Python (bootstrap downloads it, .gitignore)
+pyproject.toml / uv.lock                     single source of truth for env + deps (uv.lock is committed)
+.venv/ .tools/ .python-managed/ .uv-cache/   uv's self-contained runtime (.gitignore)
 tools/     sqlmap / ghauri source (.gitignore)
 data/      created at runtime: DB, logs/, requests/, settings.json (.gitignore)
 ```
@@ -128,17 +130,21 @@ data/      created at runtime: DB, logs/, requests/, settings.json (.gitignore)
 <details>
 <summary>🔧 Manual install (intranet, or when bootstrap can't run)</summary>
 
-1. Put a portable Python in `python\`, then run `python\python.exe -m pip install -r backend\requirements.txt`.
+**Easiest**: on a machine with internet, double-click `start.bat` once, then copy the **whole folder** to the intranet machine — because it is fully self-contained, `start.bat` just runs there with no further internet.
+
+Or assemble it by hand:
+1. Put `uv.exe` in `.tools\` (or set the env var `SQLISCANDECK_UV_SRC` to a shared copy of `uv.exe` and `start.bat` will copy it for you).
 2. Put the sqlmap source in `tools\sqlmap\` (must contain `sqlmap.py`, `sqlmapapi.py`).
-3. Put the ghauri source in `tools\ghauri\` (must contain `ghauri\scripts\ghauri.py`), then install its deps: `pip install tldextract colorama requests chardet ua_generator`.
-4. Run `start.bat`, or `python backend\app.py` directly.
+3. Put the ghauri source in `tools\ghauri\` (must contain `ghauri\scripts\ghauri.py`).
+4. Run `start.bat`. It restores Python + deps from `uv.lock` (this step still needs to fetch Python and packages; for a fully offline box use the "copy the whole folder" approach above).
 
 </details>
 
 <details>
 <summary>❓ FAQ</summary>
 
-- Engine light is red: `tools\sqlmap` or `tools\ghauri` isn't ready. Re-run `bootstrap.bat`.
+- First launch is slow: it's downloading uv, Python, and packages — first run only; it's fast afterwards. For a fully offline box, see the "copy the whole folder" trick under Manual install.
+- Engine light is red: `tools\sqlmap` or `tools\ghauri` isn't ready. Re-run `bootstrap.bat` (it only fetches those two engines).
 - Command preview is blank or wrong: the backend was updated. Restart the server, then hard-refresh.
 - Pressing F5 inside a project: it stays in that project instead of returning to the list.
 - MySQL target won't start: the first run downloads MariaDB and needs internet. If it hangs, run `stop_mysql_lab.bat`, then `start_mysql_lab.bat` again.

@@ -8,21 +8,22 @@ SQLiScanDeck 是 sqlmap 與 ghauri 的本機圖形介面。貼上一段 HTTP 請
 
 > ⚠️ 只對你有書面授權的目標測試。未授權掃描可能違法,後果自負。這是本機工具,預設只綁 `127.0.0.1`、沒有內建帳號認證;不要上傳 `data/`,裡面有真實請求與 cookie。
 
-需求:Windows 10/11,首次 `bootstrap` 需要連網下載。不會動到系統的 Python。
+需求:Windows 10/11,首次啟動需要連網。不會動到系統的 Python。
 
 ## 安裝
 
-1. 第一次:連上網路,雙擊 `bootstrap.bat`。它會下載內嵌 Python、sqlmap、ghauri,只需這一次。
-2. 之後每次:雙擊 `start.bat`,會自動開瀏覽器到 `http://127.0.0.1:8776`。
+**雙擊 `start.bat` 就好。** 第一次會連網,自動把 [uv](https://docs.astral.sh/uv/)、一份專用 Python、相依套件與 sqlmap/ghauri 全部裝進專案資料夾(只有第一次),然後開瀏覽器到 `http://127.0.0.1:8776`。
 
-整包可以複製到另一台已經 bootstrap 過的機器,直接 `start.bat` 就能用。掃描歷史和分頁存在 `data/`,跟著搬過去也還在。
+- **完全自包**:所有東西都在資料夾內,不改系統、不改 PATH。刪掉資料夾 = 系統零殘留。
+- **搬到另一台**:整包複製過去(含 `uv.lock`),`start.bat` 會依 lock 還原一模一樣的環境。掃描歷史與分頁存在 `data/`,跟著搬也還在。
+- **內網 / 連不到 GitHub**:見下方「手動安裝」。
 
 ## 試玩
 
 專案內附一個練習靶機,可以零風險先跑一輪。
 
 ```
-python testlab\vuln_server.py          # 故意有洞的靶機,綁 127.0.0.1:5000
+uv run python testlab\vuln_server.py   # 故意有洞的靶機,綁 127.0.0.1:5000
 ```
 
 在介面貼上 `http://127.0.0.1:5000/product?id=1`,選工具,按「開始掃描」。約幾秒後佇列會亮紅燈(有洞),點進去看即時 log、判定依據與 payload。
@@ -105,7 +106,7 @@ python testlab\vuln_server.py          # 故意有洞的靶機,綁 127.0.0.1:500
 <summary>🏗️ 架構</summary>
 
 ```
-backend/   FastAPI 後端,跑在內嵌 Python 上
+backend/   FastAPI 後端,跑在 uv 建立的 .venv 上
   app.py            API 路由、靜態前端、/api/preview 指令預覽、回環位址閘門
   scan_manager.py   併發佇列、即時 log 串流、持久化、強停與刪除
   drivers/          sqlmap / ghauri 雙驅動,build_args 是唯一的組指令來源
@@ -113,7 +114,8 @@ backend/   FastAPI 後端,跑在內嵌 Python 上
   request_parser.py / filters.py / signature.py / ip_utils.py / config.py
 web/       單頁前端(index.html / style.css / app.js,無框架)
 testlab/   vuln_server.py 與 vuln_mysql_server.py,兩個練習靶機,只綁 127.0.0.1
-python/    內嵌可攜帶 Python(bootstrap 下載,.gitignore)
+pyproject.toml / uv.lock                     相依與環境的單一真相(uv.lock 進版控)
+.venv/ .tools/ .python-managed/ .uv-cache/   uv 建立的自包環境(.gitignore)
 tools/     sqlmap / ghauri 原始碼(.gitignore)
 data/      執行時建立:DB、logs/、requests/、settings.json(.gitignore)
 ```
@@ -128,17 +130,21 @@ data/      執行時建立:DB、logs/、requests/、settings.json(.gitignore)
 <details>
 <summary>🔧 手動安裝(內網或無法 bootstrap 時)</summary>
 
-1. 把可攜帶 Python 放到 `python\`,執行 `python\python.exe -m pip install -r backend\requirements.txt`。
+**最省事**:在一台有網路的機器雙擊一次 `start.bat`,再把**整個資料夾**複製到內網機器 —— 因為全自包,直接 `start.bat` 就能跑,不必再連網。
+
+要手動湊也行:
+1. 把 `uv.exe` 放到 `.tools\`(或設環境變數 `SQLISCANDECK_UV_SRC` 指到共享資料夾裡的 `uv.exe`,`start.bat` 會自己複製)。
 2. 把 sqlmap 原始碼放到 `tools\sqlmap\`(要有 `sqlmap.py`、`sqlmapapi.py`)。
-3. 把 ghauri 原始碼放到 `tools\ghauri\`(要有 `ghauri\scripts\ghauri.py`),補相依:`pip install tldextract colorama requests chardet ua_generator`。
-4. 執行 `start.bat`,或直接 `python backend\app.py`。
+3. 把 ghauri 原始碼放到 `tools\ghauri\`(要有 `ghauri\scripts\ghauri.py`)。
+4. 執行 `start.bat`。它會用 `uv.lock` 還原 Python 與相依(這步仍需能取得 Python 與套件;完全離線就用上面「整包複製」)。
 
 </details>
 
 <details>
 <summary>❓ 常見問題</summary>
 
-- 引擎燈是紅的:`tools\sqlmap` 或 `tools\ghauri` 沒就緒,重跑 `bootstrap.bat`。
+- 第一次啟動很慢:正在下載 uv、Python 與套件,只有第一次;之後就快了。要完全離線請看「手動安裝」的整包複製法。
+- 引擎燈是紅的:`tools\sqlmap` 或 `tools\ghauri` 沒就緒,重跑 `bootstrap.bat`(它只補這兩個引擎)。
 - 指令預覽是空的或有誤:後端有更新,重啟 server 再硬刷新。
 - 在專案內按 F5:會留在該專案,不會跳回列表。
 - MySQL 靶機開不起來:首次需連網下載 MariaDB;卡住就 `stop_mysql_lab.bat` 後重跑 `start_mysql_lab.bat`。
