@@ -52,11 +52,13 @@ if not exist "%UV%" (
 )
 
 REM --- 2) ensure the ENGINES (sqlmap + ghauri SOURCE). uv cannot fetch these:
-REM        they are run from source, not PyPI packages. bootstrap.ps1 is idempotent. ---
-if not exist "%ROOT%\tools\sqlmap\sqlmapapi.py" goto FETCH_ENGINES
-if not exist "%ROOT%\tools\ghauri\ghauri\scripts\ghauri.py" goto FETCH_ENGINES
-goto ENGINES_OK
-:FETCH_ENGINES
+REM        they run from source, not PyPI. Accept version-suffixed dirs (sqlmap-1.10,
+REM        ghauri-1.4.3, ...) exactly like config.resolve_tool_dir. bootstrap.ps1 is idempotent. ---
+set "SQLMAP_OK="
+for /d %%D in ("%ROOT%\tools\sqlmap*") do if exist "%%D\sqlmapapi.py" set "SQLMAP_OK=1"
+set "GHAURI_OK="
+for /d %%D in ("%ROOT%\tools\ghauri*") do if exist "%%D\ghauri\scripts\ghauri.py" set "GHAURI_OK=1"
+if defined SQLMAP_OK if defined GHAURI_OK goto ENGINES_OK
 echo [start] fetching sqlmap + ghauri source ^(one-time^) ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\bootstrap.ps1"
 if errorlevel 1 (
