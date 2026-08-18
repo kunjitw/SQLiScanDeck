@@ -541,7 +541,15 @@ def create_scan(scan):
 
 def get_scan(sid):
     with _lock:
-        return _row(_conn.execute("SELECT * FROM scans WHERE id=?", (sid,)).fetchone())
+        r = _row(_conn.execute("SELECT * FROM scans WHERE id=?", (sid,)).fetchone())
+    if r:
+        try:
+            res = json.loads(r.get("result_json") or "{}") or {}
+        except Exception:
+            res = {}
+        r["reliability_ok"] = res.get("reliability_ok", True)
+        r["caveat"] = res.get("caveat") or ""   # advisory ⚠ note on a 無洞 result
+    return r
 
 
 # columns the board/tree actually render — lets the 1.5s poll skip the heavy
@@ -619,6 +627,12 @@ def list_scans(project_id=None, status=None, limit=200, slim=False):
         if slim:
             for r in rows:
                 r["pouts"] = _param_outcomes(r)
+                try:
+                    res = json.loads(r.get("result_json") or "{}") or {}
+                except Exception:
+                    res = {}
+                r["reliability_ok"] = res.get("reliability_ok", True)
+                r["caveat"] = res.get("caveat") or ""   # advisory ⚠ note on a 無洞 result (低可信原因)
                 r.pop("params_json", None)
                 r.pop("result_json", None)
         return rows

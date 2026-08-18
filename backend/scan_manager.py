@@ -131,20 +131,20 @@ class ScanContext:
             duration_ms=ended - started,
         )
         # Record per-param history on any completion we drew evidence from: a clean
-        # 'done', an 'inconclusive' run (records ONLY the params the tool actually
-        # judged -- see below), or any CONFIRMED vuln even if the run then errored/was
-        # killed (never lose a real injection). A killed/error scan with NO vuln records
-        # nothing, so it can't poison the dedup history with false negatives.
-        if status in ("done", "inconclusive") or vulnerable:
+        # 'done' (records ONLY the params the tool actually judged -- see the reliability
+        # gate below), or any CONFIRMED vuln even if the run then errored/was killed
+        # (never lose a real injection). A killed/error scan with NO vuln records nothing,
+        # so it can't poison the dedup history with false negatives.
+        if status == "done" or vulnerable:
             return self._record_param_history(vulnerable, findings)
         return None
 
     def _record_param_history(self, vulnerable, findings):
         summary_vuln = _vuln_param_names(findings) if vulnerable else set()
         explicit = (findings or {}).get("per_param") or {}   # {name: vulnerable|clean}
-        # a severe-reliability run (測不準) has an untrustworthy baseline; its per-param
-        # "clean" lines rest on that same baseline, so we record ONLY confirmed vulns and
-        # leave everything else 未測 (no false clean into the dedup history).
+        # a low-confidence clean (severe-reliability 無洞) has an untrustworthy baseline;
+        # its per-param "clean" lines rest on that same baseline, so we record ONLY
+        # confirmed vulns and leave everything else 未測 (no false clean into dedup).
         reliable = (findings or {}).get("reliability_ok", True)
         recorded = []
         for p in self.params:

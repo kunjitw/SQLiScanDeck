@@ -323,42 +323,38 @@ def clean_covers_selected(selected_names, findings, had_selection=False):
     return False if had_selection else bool(tested)
 
 
-def decide_status(returncode, vulnerable, clean_hit, selected_names, findings, log_text, had_selection=False):
-    """Single source of truth for a scan's terminal status, shared by both
-    engines so sqlmap and ghauri never diverge. Evidence-based:
-      - vulnerable       -> 'done'  (the red verdict rides the `vulnerable` flag)
-      - never really ran -> 'error' (rc != 0, or no positive 'nothing injectable' signal)
-      - ran but the "clean" can't be trusted -> 'inconclusive' (測不準):
-          * a SEVERE reliability problem (HTTP-error storm / base request errored /
-            persistent connection failure), OR
-          * a coverage gap: the selected params were never actually tested
-      - ran clean, reliably, covering the selected params -> 'done' (無洞/green)
-    """
+def decide_status(returncode, vulnerable, clean_hit):
+    """Single source of truth for a scan's terminal status, shared by both engines.
+    THREE outcomes only -- the user reads the verdict as 有洞/無洞/失敗, and reliability
+    is a separate side-note (see clean_caveat), never its own status:
+      - vulnerable            -> 'done'  (有洞 rides the `vulnerable` flag)
+      - never really ran      -> 'error' (失敗: rc != 0, or no 'nothing injectable' signal)
+      - ran and reached a clean completion signal -> 'done' (無洞)
+    A low-confidence clean (error storm / coverage gap) is still 'done' (無洞); its
+    caveat is surfaced via clean_caveat as an advisory ⚠, not a verdict."""
     if vulnerable:
         return "done"
     if returncode != 0 or not clean_hit:
         return "error"
-    if severe_reliability(log_text)[0] is not None:
-        return "inconclusive"
-    if not clean_covers_selected(selected_names, findings, had_selection):
-        return "inconclusive"
     return "done"
 
 
-def inconclusive_reason(selected_names, findings, log_text, had_selection=False):
-    """Human note explaining WHY a scan came out 測不準, for the 【判定】 block."""
+def clean_caveat(selected_names, findings, log_text, had_selection=False):
+    """Secondary reliability/coverage caveat for a 無洞 (clean 'done') result -- an
+    advisory '額外參考', NOT a verdict. Returns a short note when the clean result is
+    LOW-confidence (so the UI can show a ⚠), or None when it is fully trustworthy."""
     _m, note = severe_reliability(log_text)
     if note:
         return note
-    tested = _tested_param_names(findings)
-    missing = [n for n in (selected_names or []) if n not in tested]
-    if missing:
-        return "所選參數未被實際測試(工具日誌未對其下任何結論):" + "、".join(missing)
-    if had_selection and not list(selected_names or []):
-        return "所選欄位皆不可測 SQLi(例如檔案上傳欄位),未實際測試"
-    if not list(selected_names or []):
-        return "沒有可測的參數,未取得任何逐參數結論"
-    return "未取得足夠證據可判定為「無洞」"
+    if not clean_covers_selected(selected_names, findings, had_selection):
+        tested = _tested_param_names(findings)
+        missing = [n for n in (selected_names or []) if n not in tested]
+        if missing:
+            return "部分所選參數未實際受測:" + "、".join(missing)
+        if had_selection and not list(selected_names or []):
+            return "所選欄位皆不可測 SQLi(例如檔案上傳欄位)"
+        return "未取得足夠逐參數證據"
+    return None
 
 
 def per_param_verdicts(log_text):
@@ -491,7 +487,7 @@ def extract_findings(log_text):
 def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
                    status, returncode, fail_marker, fail_line,
                    clean_hit, waf_marker, findings, recorded_history,
-                   inconclusive_note=None):
+                   caveat_note=None):
     """Emit a compact, machine-parseable 【判定】 block that explains HOW the app
     judged this scan: each conclusion + the exact evidence it rests on. MUST be
     called AFTER the verdict is computed from read_log(), so quoting an English
@@ -507,11 +503,10 @@ def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
         if vuln_line:
             L("【判定】  依據行:{}".format(vuln_line))
     elif status == "done":
-        L("【判定】有漏洞:否 ← 已測完所選參數、命中「無可注入」完成訊號")
-    elif status == "inconclusive":
-        L("【判定】有漏洞:測不準 ← 雖有「無可注入」訊號,但結果不可信,不能當作「無洞」")
-        if inconclusive_note:
-            L("【判定】  原因:{}".format(inconclusive_note))
+        if caveat_note:
+            L("【判定】有漏洞:否(無洞)⚠ 低可信參考 ← 有「無可注入」完成訊號,但{}".format(caveat_note))
+        else:
+            L("【判定】有漏洞:否(無洞)← 已測完所選參數、命中「無可注入」完成訊號")
     else:
         L("【判定】有漏洞:無法判定 ← 掃描未正常完成或未出現「無可注入」完成訊號(狀態:{}),此結果不代表「無洞」".format(status))
 
@@ -526,9 +521,6 @@ def append_verdict(ctx, *, tool, vulnerable, vuln_marker, vuln_line,
             L("【判定】  依據行:{}".format(fail_line))
     elif status == "error":
         L("【判定】狀態:error ← returncode=0,但未出現「測試完成」訊號(疑似連線/SSL 失敗或掃描中斷)—— 目標未實際測完,不能當作「無洞」")
-    elif status == "inconclusive":
-        L("【判定】狀態:inconclusive(測不準)← returncode={}、有「無可注入」訊號,但{}".format(
-            returncode, inconclusive_note or "結果不可信"))
     elif clean_hit:
         L("【判定】狀態:done ← returncode={}、命中「已測完但無可注入參數」完成訊號".format(returncode))
     elif fail_marker:

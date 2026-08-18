@@ -216,15 +216,16 @@ def run(ctx):
         # had_selection guards the "user selected ONLY non-testable fields" edge.
         selected_names = base.selected_names(getattr(ctx, "params", []))
         had_selection = any(p.get("selected") for p in getattr(ctx, "params", []))
-        # Evidence-based terminal status (shared by both engines via base.decide_status):
-        # green 無洞 ONLY when the run reliably tested the SELECTED params and found
-        # nothing. A clean signal amid an HTTP-error storm, or one that never covered
-        # the selected params (e.g. cookies at --level 1, or the URI '#1*' fallback),
-        # becomes 'inconclusive' (測不準) -- never a groundless 無洞. rc!=0 or no clean
-        # signal at all is still 'error'.
-        status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text, had_selection)
-        inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text, had_selection)
-                             if status == "inconclusive" else None)
+        # Three-outcome verdict (shared via base.decide_status): 有洞 / 無洞 / 失敗.
+        # A low-confidence clean (error storm, or a coverage gap like cookies at
+        # --level 1 / the URI '#1*' fallback) is STILL 無洞 -- its reason becomes an
+        # advisory ⚠ caveat below, not a separate status.
+        status = base.decide_status(rc, vulnerable, clean_hit)
+        # A low-confidence clean stays 無洞; its reason rides along as an advisory ⚠
+        # caveat (findings['caveat']) for the UI, never as its own verdict.
+        caveat = (base.clean_caveat(selected_names, findings, log_text, had_selection)
+                  if (status == "done" and not vulnerable) else None)
+        findings["caveat"] = caveat
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
         base.append_verdict(ctx, tool="sqlmap", vulnerable=vulnerable,
                             vuln_marker=vuln_marker, vuln_line=vuln_line,
@@ -232,7 +233,7 @@ def run(ctx):
                             fail_marker=fail_marker, fail_line=fail_line,
                             clean_hit=clean_hit, waf_marker=waf_marker,
                             findings=findings, recorded_history=recorded,
-                            inconclusive_note=inconclusive_note)
+                            caveat_note=caveat)
 
 
 def _drain(q, ctx):

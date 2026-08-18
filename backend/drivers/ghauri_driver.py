@@ -240,13 +240,15 @@ def run(ctx):
         # had_selection guards the "user selected ONLY non-testable fields" edge.
         selected_names = base.selected_names(getattr(ctx, "params", []))
         had_selection = any(p.get("selected") for p in getattr(ctx, "params", []))
-        # Evidence-based terminal status, shared with sqlmap via base.decide_status so
-        # the two engines never diverge: green 無洞 only on a reliable run that covered
-        # the selected params; a clean signal amid an error storm or without coverage
-        # becomes 'inconclusive' (測不準); rc!=0 or no clean signal at all stays 'error'.
-        status = base.decide_status(rc, vulnerable, clean_hit, selected_names, findings, log_text, had_selection)
-        inconclusive_note = (base.inconclusive_reason(selected_names, findings, log_text, had_selection)
-                             if status == "inconclusive" else None)
+        # Three-outcome verdict, shared with sqlmap via base.decide_status so the two
+        # engines never diverge: 有洞 / 無洞 / 失敗. A low-confidence clean (error storm
+        # or coverage gap) stays 無洞 -- its reason becomes an advisory ⚠ caveat below.
+        status = base.decide_status(rc, vulnerable, clean_hit)
+        # A low-confidence clean stays 無洞; its reason rides along as an advisory ⚠
+        # caveat (findings['caveat']) for the UI, never as its own verdict.
+        caveat = (base.clean_caveat(selected_names, findings, log_text, had_selection)
+                  if (status == "done" and not vulnerable) else None)
+        findings["caveat"] = caveat
         recorded = ctx.finish(status=status, vulnerable=vulnerable, findings=findings)
         base.append_verdict(ctx, tool="ghauri", vulnerable=vulnerable,
                             vuln_marker=vuln_marker, vuln_line=vuln_line,
@@ -254,7 +256,7 @@ def run(ctx):
                             fail_marker=fail_marker, fail_line=fail_line,
                             clean_hit=clean_hit, waf_marker=waf_marker,
                             findings=findings, recorded_history=recorded,
-                            inconclusive_note=inconclusive_note)
+                            caveat_note=caveat)
 
 
 def _drain(q, ctx):

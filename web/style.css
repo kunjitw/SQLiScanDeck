@@ -740,6 +740,9 @@ table tr:last-child td { border-bottom: none; }
 .state-chip.st-running { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
 .state-chip.st-inconclusive { color: var(--inconclusive); background: var(--inconclusive-soft); border-color: var(--inconclusive); }
 .state-chip.st-other, .state-chip.st-untested { color: var(--fg-dim); background: var(--bg-soft); border-color: var(--border-strong); }
+/* advisory ⚠ on a 無洞 result whose reliability/coverage is low -- extra reference only,
+   never a verdict. Amber, hover for the reason. */
+.caveat-flag { color: var(--warn); font-weight: 700; cursor: help; }
 .state-chip.st-tent { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
 .state-chip.st-skip { color: var(--fg-dim); background: transparent; border-color: var(--border); min-width: 0; }
 /* verdict headline: the single conclusion */

@@ -1985,7 +1985,6 @@ async function loadScans() {
 const SCAN_FILTERS = [
   { key: "", label: "全部" },
   { key: "vuln", label: "有漏洞" },
-  { key: "inconclusive", label: "測不準" },   // ran but result not trustworthy as 無洞
   { key: "clean", label: "無洞" },
   { key: "running", label: "掃描中" },
   { key: "other", label: "失敗/中止" },   // 'other' = error/stopped(失敗) AND killed(已中止)
@@ -2057,12 +2056,19 @@ async function refreshParamBadges() {
 function scanOutcome(s) {
   if (s.vulnerable) return { key: "vuln", label: "有漏洞", cls: "st-vuln" };
   if (s.status === "running" || s.status === "queued") return { key: "running", label: "掃描中", cls: "st-running" };
-  if (s.status === "inconclusive") return { key: "inconclusive", label: "測不準", cls: "st-inconclusive" };
-  if (s.status === "done") return { key: "clean", label: "無洞", cls: "st-clean" };
+  // 無洞 is one of THREE primary outcomes. 'inconclusive' is legacy -> also 無洞;
+  // low confidence rides along as an advisory ⚠ (s.caveat), never its own verdict.
+  if (s.status === "done" || s.status === "inconclusive") return { key: "clean", label: "無洞", cls: "st-clean" };
   if (s.status === "killed") return { key: "other", label: "已中止", cls: "st-other" };
   return { key: "other", label: "失敗", cls: "st-other" };   // error / stopped
 }
-function stateChip(s) { const o = scanOutcome(s); return `<span class="state-chip ${o.cls}">${o.label}</span>`; }
+// advisory ⚠ shown ONLY on a 無洞 result whose reliability/coverage is low (s.caveat).
+// Hover shows why. It never changes the primary reading.
+function caveatFlag(s) {
+  if (scanOutcome(s).key !== "clean" || !s.caveat) return "";
+  return ` <span class="caveat-flag" title="低可信參考:${esc(s.caveat)}">⚠</span>`;
+}
+function stateChip(s) { const o = scanOutcome(s); return `<span class="state-chip ${o.cls}">${o.label}${caveatFlag(s)}</span>`; }
 function renderScanRow(s) {
   const st = scanOutcome(s).key;   // border colour matches the chip -> one axis
   const time = s.started_at ? new Date(s.started_at).toLocaleTimeString() : new Date(s.created_at).toLocaleTimeString();
@@ -2111,18 +2117,17 @@ function splitEndpoint(s) {
   return { host: host || "(未知主機)", ep: method + " " + path };
 }
 // A node's colour encodes the WORST state among its scans:
-//   vuln(red) > running(orange) > inconclusive/測不準(violet) > clean/無洞(green) > other:error/killed(grey) > untested(grey)
+//   vuln(red) > running(orange) > clean/無洞(green) > other:error/killed(grey) > untested(grey)
 // This is the single "severity" axis. The current-searched path is shown on a
-// SEPARATE axis (the accent connector line) so the two never clash. inconclusive
-// ranks ABOVE clean so a node holding any 測不準 scan never shows solid green.
+// SEPARATE axis (the accent connector line) so the two never clash. Low-confidence
+// clean is still 無洞 (its ⚠ caveat is per-scan detail, not a tree colour).
 function scanState(s) {
   if (s.vulnerable) return "vuln";
   if (s.status === "running" || s.status === "queued") return "running";
-  if (s.status === "inconclusive") return "inconclusive";
-  if (s.status === "done") return "clean";
+  if (s.status === "done" || s.status === "inconclusive") return "clean";
   return "other"; // error / killed / stopped
 }
-const STATE_RANK = { vuln: 0, running: 1, inconclusive: 2, clean: 3, other: 4, untested: 5 };
+const STATE_RANK = { vuln: 0, running: 1, clean: 2, other: 3, untested: 4 };
 function worstOf(states) {
   let best = "untested";
   for (const s of states) if (STATE_RANK[s] < STATE_RANK[best]) best = s;
@@ -2604,7 +2609,9 @@ function _verdictPanelHtml(items, scan) {
   if (!scan) return "";
   const oc = scanOutcome(scan);
   const note = (re) => { const it = (items || []).find(x => re.test(x.label)); return it ? (it.note || it.value) : ""; };
-  const sub = oc.key === "vuln" ? note(/有漏洞/) : (note(/狀態/) || note(/有漏洞/));
+  const sub = oc.key === "vuln" ? note(/有漏洞/)
+            : (oc.key === "clean" && scan.caveat) ? ("⚠ 低可信參考:" + scan.caveat)
+            : (note(/狀態/) || note(/有漏洞/));
   const waf = (items || []).find(it => /WAF|IPS/.test(it.label));
   const wafRow = waf
     ? `<div class="vd-row vd-waf"><span class="vd-label">${esc(waf.label)}</span><span class="vd-value">${esc(waf.value)}</span>${waf.note ? `<span class="vd-note">${esc(waf.note)}</span>` : ""}</div>`
