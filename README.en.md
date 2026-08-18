@@ -23,7 +23,7 @@ Requirements: Windows 10/11. The first launch needs internet. It never touches y
 The project ships a practice target so you can do a full run with zero risk.
 
 ```
-uv run python testlab\vuln_server.py   # deliberately vulnerable target, binds to 127.0.0.1:5000
+.venv\Scripts\python testlab\vuln_server.py   # deliberately vulnerable target, 127.0.0.1:5000 (after start.bat has run once)
 ```
 
 In the UI, paste `http://127.0.0.1:5000/product?id=1`, pick a tool, and press Start scan. After a few seconds the queue turns red (vulnerable); open it to see the live log, the evidence behind the verdict, and the payload.

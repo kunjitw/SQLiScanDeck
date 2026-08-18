@@ -17,6 +17,7 @@ dependencies = [
     "tldextract",
     "colorama",
     "requests",
+    "urllib3",      # ghauri imports urllib3 directly (not only transitively via requests)
     "chardet",
     "ua_generator",
 ]

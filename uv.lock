@@ -455,6 +455,7 @@ dependencies = [
     { name = "requests" },
     { name = "tldextract" },
     { name = "ua-generator" },
+    { name = "urllib3" },
     { name = "uvicorn" },
 ]
 
@@ -466,6 +467,7 @@ requires-dist = [
     { name = "requests" },
     { name = "tldextract" },
     { name = "ua-generator" },
+    { name = "urllib3" },
     { name = "uvicorn" },
 ]
 

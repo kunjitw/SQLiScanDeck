@@ -14,14 +14,15 @@ import json
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BACKEND_DIR)
 
-# --- portable runtime + bundled tools -------------------------------------
-PYTHON_DIR = os.path.join(ROOT_DIR, "python")
-# ALWAYS prefer the bundled portable interpreter. If the folder was bootstrapped
-# (python\python.exe exists) we use it for every subprocess (sqlmapapi, ghauri),
-# no matter what launched the backend -- so the system python is never touched.
-# Fallback to sys.executable only for dev/testing before bootstrap has run.
+# --- interpreter for scanner subprocesses ---------------------------------
+PYTHON_DIR = os.path.join(ROOT_DIR, "python")     # legacy pre-uv embeddable; may linger on upgraded checkouts
 _BUNDLED_PY = os.path.join(PYTHON_DIR, "python.exe")
-PYTHON_EXE = _BUNDLED_PY if os.path.isfile(_BUNDLED_PY) else (sys.executable or _BUNDLED_PY)
+# uv now owns the runtime: the backend runs inside the uv-managed .venv, whose
+# interpreter (sys.executable) already has every dependency from uv.lock -- including
+# ghauri's runtime libs. So sqlmap/ghauri subprocesses MUST reuse sys.executable, not a
+# leftover .\python\ (which uv never manages and whose pinned deps drift out of sync).
+# Fall back to the old bundled interpreter only if sys.executable is somehow unavailable.
+PYTHON_EXE = sys.executable or _BUNDLED_PY
 
 TOOLS_DIR = os.path.join(ROOT_DIR, "tools")
 

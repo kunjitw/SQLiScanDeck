@@ -23,7 +23,7 @@ SQLiScanDeck 是 sqlmap 與 ghauri 的本機圖形介面。貼上一段 HTTP 請
 專案內附一個練習靶機,可以零風險先跑一輪。
 
 ```
-uv run python testlab\vuln_server.py   # 故意有洞的靶機,綁 127.0.0.1:5000
+.venv\Scripts\python testlab\vuln_server.py   # 故意有洞的靶機,綁 127.0.0.1:5000(先跑過一次 start.bat)
 ```
 
 在介面貼上 `http://127.0.0.1:5000/product?id=1`,選工具,按「開始掃描」。約幾秒後佇列會亮紅燈(有洞),點進去看即時 log、判定依據與 payload。

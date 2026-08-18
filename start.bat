@@ -71,7 +71,7 @@ if errorlevel 1 (
 
 REM --- 3) sync Python + deps from the committed uv.lock (exact, reproducible) ---
 echo [start] syncing environment via uv ...
-"%UV%" sync --frozen
+"%UV%" sync --frozen --project "%ROOT%"
 if errorlevel 1 (
   echo [start] uv sync failed. See the error above.
   pause
@@ -80,5 +80,5 @@ if errorlevel 1 (
 
 REM --- 4) launch the web UI (opens your browser; Ctrl+C to stop) ---
 echo [start] starting SQLiScanDeck ... press Ctrl+C to stop.
-"%UV%" run --frozen backend
+"%UV%" run --frozen --project "%ROOT%" backend
 pause

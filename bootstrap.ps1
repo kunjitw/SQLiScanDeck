@@ -10,6 +10,7 @@
   Requires internet for the first fetch only. ASCII-only messages for any codepage.
 #>
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"   # IWR's progress bar makes multi-MB downloads ~10-30x slower on PS 5.1
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Root      = Split-Path -Parent $MyInvocation.MyCommand.Path
