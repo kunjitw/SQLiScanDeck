@@ -197,7 +197,7 @@ def get_dataset_id():
     tabs just because both happen to have a numeric project id 1."""
     import uuid
     with _lock:
-        conn = _connect()
+        conn = _conn or _connect()   # reuse the existing connection (init_db already set it)
         row = conn.execute("SELECT value FROM meta WHERE key='dataset_id'").fetchone()
         if row and row["value"]:
             return row["value"]

@@ -13,9 +13,25 @@ def _is_testable(p):
     return bool(p.get("selected")) and not p.get("is_file") and p.get("location") != "FILE"
 
 
+_JSON_IDX_RE = re.compile(r"\[\d+\]")
+
+
+def _engine_name(p):
+    """The name the ENGINE uses for -p / prints in its log. sqlmap and ghauri key a JSON
+    body param by its LEAF key, not our dotted display path: 'user.id' -> 'id',
+    'ids[0]' -> 'ids'. This matches findings['tested'] (leaf, after _strip_hint) so
+    coverage lines up and a narrowed -p actually hits the param. Non-JSON params are
+    already engine-named (no path)."""
+    name = p.get("name", "")
+    if p.get("location") == "JSON" and ("." in name or "[" in name):
+        leaf = _JSON_IDX_RE.sub("", name.split(".")[-1])
+        return leaf or name
+    return name
+
+
 def selected_names(params):
-    # unique names that are selected (and testable) in AT LEAST ONE location
-    return sorted({p["name"] for p in params if _is_testable(p)})
+    # unique ENGINE names that are selected (and testable) in AT LEAST ONE location
+    return sorted({_engine_name(p) for p in params if _is_testable(p)})
 
 
 def deselected_names(params):
@@ -23,9 +39,9 @@ def deselected_names(params):
     # Otherwise a name present in two locations (e.g. GET id + COOKIE id) with mixed
     # selection would land in BOTH testParameter and skip -- contradictory, since
     # sqlmap/ghauri filter by NAME, not by location. File fields are always here.
-    sel = {p["name"] for p in params if _is_testable(p)}
-    return sorted({p["name"] for p in params
-                   if not _is_testable(p) and p["name"] not in sel})
+    sel = {_engine_name(p) for p in params if _is_testable(p)}
+    return sorted({_engine_name(p) for p in params
+                   if not _is_testable(p) and _engine_name(p) not in sel})
 
 
 def display_cmd(parts):
@@ -160,7 +176,7 @@ _PP_TESTED_RE = re.compile(r"testing for SQL injection on .*?parameter '([^']+)'
 # Strip a KNOWN leading hint token so the reported name matches the user's bare selected
 # name. Exact leading-token match ONLY (never a substring), so a real param that merely
 # contains such a word is untouched.
-_HINT_PREFIXES = ("MULTIPART ", "JSON-like ", "JSON ", "XML ", "SOAP ", "ARRAY-LIKE ", "HEX ", "BASE64 ")
+_HINT_PREFIXES = ("MULTIPART ", "JSON-like ", "JSON ", "XML ", "SOAP ", "ARRAY-LIKE ")
 def _strip_hint(name):
     s = str(name or "").strip()
     for pre in _HINT_PREFIXES:
@@ -495,12 +511,12 @@ def extract_findings(log_text):
     findings["tables_count"] = _cnt(_TABLES_CNT_RE)
     findings["columns_count"] = _cnt(_COLS_CNT_RE)
     findings["entries_count"] = _cnt(_ENTRIES_CNT_RE)
-    findings["heuristic_sqli"] = sorted({m.group(1) for m in _HEUR_SQLI_RE.finditer(text)})
+    findings["heuristic_sqli"] = sorted({_strip_hint(m.group(1)) for m in _HEUR_SQLI_RE.finditer(text)})
 
     findings["per_param"] = per_param_verdicts(text)
     findings["tested"] = sorted({_strip_hint(m.group(1)) for m in _PP_TESTED_RE.finditer(text)})  # actually-fuzzed params (bare names)
-    findings["heuristic_xss"] = sorted({m.group(1) for m in _XSS_RE.finditer(text)})
-    findings["heuristic_fi"] = sorted({m.group(1) for m in _FI_RE.finditer(text)})
+    findings["heuristic_xss"] = sorted({_strip_hint(m.group(1)) for m in _XSS_RE.finditer(text)})
+    findings["heuristic_fi"] = sorted({_strip_hint(m.group(1)) for m in _FI_RE.finditer(text)})
     findings["caveats"] = caveats(text)
     return findings
 

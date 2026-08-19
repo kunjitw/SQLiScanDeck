@@ -148,6 +148,18 @@ def run(ctx):
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
+    # Isolate ghauri's session DB per scan. ghauri stores it at
+    # expanduser('~')/.ghauri/<host>/session.sqlite with NO flag to relocate it, so two
+    # concurrent scans on the same host would share (and cross-contaminate / lock) one
+    # session.sqlite -- risking a param reported vulnerable off another run's cached hit.
+    # Point HOME/USERPROFILE at a per-scan dir (ntpath.expanduser honors USERPROFILE first).
+    scan_home = os.path.join(config.DATA_DIR, "ghauri_home", str(ctx.id))
+    try:
+        os.makedirs(scan_home, exist_ok=True)
+    except Exception:
+        pass
+    env["USERPROFILE"] = scan_home
+    env["HOME"] = scan_home
 
     try:
         proc = subprocess.Popen(

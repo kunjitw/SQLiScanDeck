@@ -102,11 +102,16 @@ def api_meta():
 @app.get("/api/ip")
 def api_ip():
     s = manager.settings
-    return ip_utils.get_ip_info(
+    info = ip_utils.get_ip_info(
         want_public=s.get("public_ip_lookup", True),
         public_timeout=s.get("public_ip_timeout", 2.5),
         preferred_ip=s.get("preferred_local_ip", ""),
     )
+    # NIC adapter names are reconnaissance-grade intel; withhold them from non-loopback
+    # (0.0.0.0) clients, exactly like get_scan/_gate_tabs withhold the raw request/tabs.
+    if not _is_loopback():
+        info["interfaces"] = []
+    return info
 
 
 @app.get("/api/settings")
@@ -124,8 +129,35 @@ def update_settings(payload: dict = Body(...)):
 # --------------------------------------------------------------------------
 # projects
 # --------------------------------------------------------------------------
+_BOUND_HOST = None   # address uvicorn ACTUALLY bound to (set once in main()); the loopback gate
+                     # keys off THIS, not the mutable settings host, so a runtime settings write
+                     # (POST /api/settings {"host":"127.0.0.1"}) can't flip the gate off.
+
+
 def _is_loopback():
-    return str(manager.settings.get("host", "127.0.0.1")).lower() in ("127.0.0.1", "localhost", "::1")
+    host = _BOUND_HOST if _BOUND_HOST is not None else manager.settings.get("host", "127.0.0.1")
+    return str(host).lower() in ("127.0.0.1", "localhost", "::1")
+
+
+# fields on a scan row that carry captured secrets, withheld from non-loopback clients:
+# params_json = the target's cookie/session VALUES; options_json = --auth-cred/--proxy;
+# extra_flags = operator-entered; raw = the full request; result_json/result = --dump'd data.
+_SENSITIVE_SCAN_KEYS = ("raw", "extra_flags", "params_json", "options_json", "result_json", "result")
+
+
+def _gate_scan(row):
+    if isinstance(row, dict) and not _is_loopback():
+        for k in _SENSITIVE_SCAN_KEYS:
+            if k in row:
+                row[k] = None   # withheld sentinel; frontend treats null as absent (no JSON.parse)
+    return row
+
+
+def _gate_scans(rows):
+    if isinstance(rows, list):
+        for r in rows:
+            _gate_scan(r)
+    return rows
 
 
 def _gate_tabs(projs):
@@ -146,7 +178,7 @@ def list_projects():
 
 @app.post("/api/projects")
 def create_project(payload: dict = Body(...)):
-    name = (payload.get("name") or "").strip()
+    name = str(payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "專案名稱不可為空")
     return db.create_project(name, payload.get("note", ""), payload.get("restrict_ip", ""))
@@ -196,6 +228,14 @@ def create_rule(payload: dict = Body(...)):
         raise HTTPException(400, "purpose 必須是 filter / advise / recon")
     if not pattern:
         raise HTTPException(400, "pattern 不可為空")
+    if mode == "regex":
+        import re as _re
+        if len(str(pattern)) > 300:
+            raise HTTPException(400, "regex pattern 太長(上限 300 字元)")
+        try:
+            _re.compile(pattern)
+        except Exception as e:
+            raise HTTPException(400, "regex 無效:{}".format(e))
     return db.create_rule(
         kind, mode, pattern, payload.get("note", ""),
         payload.get("project_id"), payload.get("enabled", True),
@@ -238,7 +278,7 @@ def default_template(tool: str = None):
 
 @app.post("/api/templates")
 def create_template(payload: dict = Body(...)):
-    name = (payload.get("name") or "").strip()
+    name = str(payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "範本名稱不可為空")
     data = payload.get("data", {}) or {}
@@ -269,6 +309,8 @@ def parse(payload: dict = Body(...)):
     annotated, signature, sig_endpoint, endpoint, recon = _annotate_params(parsed, project_id)
     parsed["params"] = annotated
     history = manager.history_for(project_id, signature, sig_endpoint)
+    if isinstance(history, dict):
+        _gate_scans(history.get("related_scans"))   # withhold related scans' secrets off-loopback
     return {
         "parsed": parsed,
         "signature": signature,
@@ -292,7 +334,7 @@ def create_scans(payload: dict = Body(...)):
     if db.get_project(project_id) is None:
         raise HTTPException(400, "指定的專案不存在")
     options = payload.get("options", {}) or {}
-    params = payload.get("params", []) or []
+    params = payload.get("params") if isinstance(payload.get("params"), list) else []
     extra_flags = payload.get("extra_flags", "") or ""
     restrict_ip = payload.get("restrict_ip", "") or ""
     note = payload.get("note", "") or ""
@@ -321,6 +363,10 @@ def create_scans(payload: dict = Body(...)):
     # sqlmap would get skip=<every name> and abort "all parameters were skipped".
     if params and not any(p.get("selected") for p in params):
         raise HTTPException(400, "請至少勾選一個要測試的參數")
+    # a selection that is ALL non-testable (e.g. only a file-upload field) would emit no -p
+    # and let sqlmap/ghauri silently fuzz every UNCHECKED param -> reject it explicitly.
+    if params and any(p.get("selected") for p in params) and not drv_base.selected_names(params):
+        raise HTTPException(400, "所選欄位皆不可測 SQLi(例如檔案上傳欄位),請改勾其他參數")
 
     launched = []
     for tool in tools:
@@ -346,9 +392,11 @@ class _PreviewCtx:
 
     def extra_flag_list(self):
         try:
-            return shlex.split(self.extra_flags) if self.extra_flags else []
+            toks = shlex.split(self.extra_flags) if self.extra_flags else []
         except Exception:
-            return (self.extra_flags or "").split()
+            toks = (self.extra_flags or "").split()
+        from scan_manager import filter_extra_flags
+        return filter_extra_flags(toks)   # preview must match the real run (host-side flags stripped)
 
 
 @app.post("/api/preview")
@@ -361,7 +409,7 @@ def preview_cmd(payload: dict = Body(...)):
     raw = payload.get("raw", "")
     force_ssl = bool(payload.get("force_ssl", False))
     options = payload.get("options", {}) or {}
-    params = payload.get("params", []) or []
+    params = payload.get("params") if isinstance(payload.get("params"), list) else []
     extra_flags = payload.get("extra_flags", "") or ""
 
     parsed = request_parser.parse_request(raw, force_ssl=force_ssl)
@@ -389,7 +437,7 @@ def scans_stop_all(project_id: int = None):
 
 @app.get("/api/scans")
 def list_scans(project_id: int = None, status: str = None, limit: int = 200, slim: bool = False):
-    return db.list_scans(project_id=project_id, status=status, limit=limit, slim=slim)
+    return _gate_scans(db.list_scans(project_id=project_id, status=status, limit=limit, slim=slim))
 
 
 @app.get("/api/scans/{sid}")
@@ -397,22 +445,22 @@ def get_scan(sid: int):
     row = db.get_scan(sid)
     if not row:
         raise HTTPException(404, "找不到掃描")
+    row["raw"] = ""
+    # non-loopback client -> withhold raw/params_json/options_json/result (target cookies,
+    # --auth-cred/--proxy, --dump'd data). Only a local operator gets the full row.
+    if not _is_loopback():
+        return _gate_scan(row)
     if row.get("result_json"):
-        row["result"] = json.loads(row["result_json"])
-    # the raw request (from the -r file) so the UI can re-load this scan's exact
-    # request + settings back into the composer ("以此設定重新配置"). The raw
-    # request contains the TARGET's cookies / auth headers, so only expose it when
-    # the server is bound to loopback -- never hand captured credentials to a
-    # non-local client on a 0.0.0.0 bind.
-    host = str(manager.settings.get("host", "127.0.0.1")).lower()
-    if host in ("127.0.0.1", "localhost", "::1"):
         try:
-            with open(os.path.join(config.REQ_DIR, "req_{}.txt".format(sid)),
-                      "r", encoding="utf-8", errors="ignore") as f:
-                row["raw"] = f.read()
+            row["result"] = json.loads(row["result_json"])
         except Exception:
-            row["raw"] = ""
-    else:
+            row["result"] = None
+    # raw request (from the -r file) so the composer can re-load this scan ("以此設定重新配置")
+    try:
+        with open(os.path.join(config.REQ_DIR, "req_{}.txt".format(sid)),
+                  "r", encoding="utf-8", errors="ignore") as f:
+            row["raw"] = f.read()
+    except Exception:
         row["raw"] = ""
     return row
 
@@ -422,6 +470,12 @@ def scan_log(sid: int, offset: int = 0):
     data = manager.get_log(sid, offset=offset)
     if data is None:
         raise HTTPException(404, "找不到掃描")
+    if not _is_loopback():
+        # the log's "指令:" line embeds --auth-cred/--proxy/extra_flags, and result holds
+        # any --dump'd databases/passwords -> withhold from non-loopback clients.
+        data["chunk"] = ""
+        data["result"] = None
+        data["error"] = None
     return data
 
 
@@ -430,7 +484,10 @@ def scan_related(sid: int):
     row = db.get_scan(sid)
     if not row:
         raise HTTPException(404, "找不到掃描")
-    return manager.history_for(row["project_id"], row["signature"], row["sig_endpoint"])
+    hist = manager.history_for(row["project_id"], row["signature"], row["sig_endpoint"])
+    if isinstance(hist, dict):
+        _gate_scans(hist.get("related_scans"))
+    return hist
 
 
 @app.get("/api/param-tests")
@@ -520,6 +577,8 @@ def main():
     import uvicorn
     settings = config.load_settings()
     host = settings["host"]
+    global _BOUND_HOST
+    _BOUND_HOST = host                 # authoritative for the loopback gate (see _is_loopback)
     port = int(settings["port"])
     url = "http://{}:{}".format("127.0.0.1" if host in ("0.0.0.0", "") else host, port)
     print("=" * 60)

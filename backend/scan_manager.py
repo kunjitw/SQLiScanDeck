@@ -23,6 +23,35 @@ import signature as sig_mod
 from drivers import sqlmap_driver, ghauri_driver
 
 
+# sqlmap/ghauri flags that execute code on the HOST running THIS tool (not the target):
+# --eval runs Python before each request, --alert runs an OS command on injection,
+# --preprocess/--postprocess run a Python file. The tool's job is TARGET-side testing,
+# so these are stripped from user-supplied extra_flags -- otherwise a scan (especially via
+# the API on a non-loopback bind) becomes arbitrary code execution on this machine.
+_BLOCKED_HOST_FLAGS = ("--eval", "--alert", "--preprocess", "--postprocess")
+
+
+def filter_extra_flags(tokens):
+    out, skip = [], False
+    for t in tokens:
+        if skip:                       # value token of a separated "--eval VALUE" form
+            skip = False
+            continue
+        if str(t).split("=", 1)[0] in _BLOCKED_HOST_FLAGS:
+            if "=" not in str(t):
+                skip = True
+            continue
+        out.append(t)
+    return out
+
+
+def _loads(s):
+    try:
+        return json.loads(s) if s else None
+    except Exception:
+        return None
+
+
 def _ts():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -37,8 +66,10 @@ def _vuln_param_names(findings):
     names avoids the substring bug where a clean 'id' matched vulnerable 'userid'."""
     names = set()
     for entry in (findings or {}).get("parameters", []) or []:
-        m = re.match(r"^\s*(.+?)\s*(?:\([^)]*\))?\s*$", entry or "")
-        name = (m.group(1) if m else entry).strip()
+        # 'id (GET)' / ghauri's 'id ((custom) POST)' -> 'id'. Split on the first ' ('
+        # (same as _tested_param_names) so a nested-paren place suffix is fully removed;
+        # a single '(?:\([^)]*\))?' group leaves 'id ((custom) POST)' unreduced.
+        name = str(entry).split(" (")[0].strip()
         if name:
             names.add(name)
     return names
@@ -82,9 +113,10 @@ class ScanContext:
 
     def extra_flag_list(self):
         try:
-            return shlex.split(self.extra_flags) if self.extra_flags else []
+            toks = shlex.split(self.extra_flags) if self.extra_flags else []
         except Exception:
-            return self.extra_flags.split()
+            toks = self.extra_flags.split()
+        return filter_extra_flags(toks)   # never let extra_flags run host-side code (--eval, ...)
 
     # --- logging (source of truth for live streaming) ---
     def append_log(self, text):
@@ -222,8 +254,11 @@ class ScanManager:
 
     def shutdown(self):
         # stop the flag AND actually kill any live ghauri/sqlmap engine process,
-        # so Ctrl+C never orphans a scanner still hitting the target.
-        for ctx in list(self.contexts.values()):
+        # so Ctrl+C never orphans a scanner still hitting the target. Snapshot under the
+        # lock (like stop_all) so a worker's contexts.pop can't raise 'changed size'.
+        with self._ctx_lock:
+            ctxs = list(self.contexts.values())
+        for ctx in ctxs:
             ctx.request_stop()
             proc = getattr(ctx, "engine_proc", None)
             if proc is not None and proc.poll() is None:
@@ -315,9 +350,14 @@ class ScanManager:
         finally:
             with self._ctx_lock:
                 self.contexts.pop(ctx.id, None)
-            # if it was deleted mid-run, re-clean any file recreated during the
-            # kill window (append_log is guarded, but be defensive about races)
+            # if it was deleted mid-run, re-clean anything recreated during the kill
+            # window: finish() may have raced past its self.deleted check and written
+            # param_status/param_test rows, so re-run the DB delete too, not just files.
             if ctx.deleted:
+                try:
+                    db.delete_scan(ctx.id)
+                except Exception:
+                    pass
                 self._remove_scan_files(ctx.id)
 
     def stop_scan(self, scan_id):
@@ -343,13 +383,15 @@ class ScanManager:
                     os.remove(path)
             except Exception:
                 pass
-        # per-scan sqlmap output tree (session.sqlite, target.txt, dump/, ...)
-        sqlmap_dir = os.path.join(config.DATA_DIR, "sqlmap_output", str(scan_id))
-        try:
-            if os.path.isdir(sqlmap_dir):
-                shutil.rmtree(sqlmap_dir, ignore_errors=True)
-        except Exception:
-            pass
+        # per-scan trees: sqlmap output (session.sqlite, target.txt, dump/, ...) and the
+        # ghauri per-scan HOME (its ~/.ghauri/<host>/session.sqlite).
+        for d in (os.path.join(config.DATA_DIR, "sqlmap_output", str(scan_id)),
+                  os.path.join(config.DATA_DIR, "ghauri_home", str(scan_id))):
+            try:
+                if os.path.isdir(d):
+                    shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
 
     def delete_scan(self, scan_id):
         """Remove a scan entirely. If still live, mark its context deleted (so the
@@ -408,7 +450,7 @@ class ScanManager:
             "offset": new_offset,
             "chunk": text,
             "duration_ms": row["duration_ms"],
-            "result": json.loads(row["result_json"]) if row["result_json"] else None,
+            "result": _loads(row["result_json"]),
             "error": row["error"],
         }
 

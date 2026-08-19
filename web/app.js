@@ -957,6 +957,7 @@ function _revealFilledZones(gridSel) {
 
 // ===== IP / health ========================================================
 async function refreshIp() {
+  const seq = state.ipSeq = (state.ipSeq || 0) + 1;   // only the LATEST refresh may commit
   const pub = $("#ipPublic"), loc = $("#ipLocal");
   // CLEAR first, then re-fetch, then write -- so a refresh is always VISIBLE and a
   // failure shows "更新失敗" instead of silently keeping the last (possibly stale) value.
@@ -964,6 +965,7 @@ async function refreshIp() {
   if (loc) { loc.textContent = "更新中…"; loc.classList.remove("unknown"); loc.title = ""; }
   try {
     const info = await api("/api/ip");
+    if (seq !== state.ipSeq) return;   // a newer refresh started while we awaited -> drop this stale result
     state.ipInfo = info;
     if (pub) { pub.textContent = info.public || "—"; pub.classList.toggle("unknown", !info.public); }
     if (loc) {
@@ -972,6 +974,7 @@ async function refreshIp() {
       loc.title = "點擊選擇要顯示的網卡";
     }
   } catch (e) {
+    if (seq !== state.ipSeq) return;   // a newer refresh is in charge -> don't clobber it with a stale failure
     if (pub) { pub.textContent = "更新失敗"; pub.classList.add("unknown"); }
     if (loc) { loc.textContent = "更新失敗"; loc.classList.add("unknown"); }
   }
@@ -998,7 +1001,13 @@ function openNicPicker() {
     if (!i.up) tags.push("未啟用");
     rows.push(row(i.ip, i.name, tags, cur === i.ip));
   });
-  if (!ifaces.length) rows.push(`<div class="nic-empty">找不到網卡清單(需要 psutil;重跑一次 start.bat 會自動裝)</div>`);
+  if (!ifaces.length) {
+    // psutil unavailable -> no named NIC list, but the backend's fallback (info.all)
+    // may still have several IPs; show them as selectable rows so multi-homed boxes
+    // aren't stuck (backend honors any preferred_ip that is in info.all).
+    (info.all || []).forEach(ip => rows.push(row(ip, "(未知網卡)", ip === info.auto ? ["自動"] : [], cur === ip)));
+    if (!(info.all || []).length) rows.push(`<div class="nic-empty">找不到網卡清單(需要 psutil;重跑一次 start.bat 會自動裝)</div>`);
+  }
   const menu = document.createElement("div");
   menu.className = "nic-menu"; menu.id = "nicMenu"; menu.innerHTML = rows.join("");
   document.body.appendChild(menu);

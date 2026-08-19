@@ -135,7 +135,10 @@ def _match(mode, pattern, text):
         if mode == "contains":
             return pattern.lower() in text.lower()
         if mode == "regex":
-            return re.search(pattern, text) is not None
+            # bound the input so a big value can't amplify a slow pattern. (Not a full
+            # ReDoS guard -- a hand-crafted catastrophic pattern is validated/rejected at
+            # rule-creation, and built-in rules are curated.)
+            return re.search(pattern, text[:4096]) is not None
     except re.error:
         return False
     except Exception:
