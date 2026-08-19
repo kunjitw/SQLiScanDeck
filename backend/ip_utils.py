@@ -32,6 +32,40 @@ def _local_outbound_ip():
             pass
 
 
+_VIRTUAL_HINTS = ("vmware", "virtualbox", "vbox", "hyper-v", "vethernet", "wsl", "loopback",
+                  "bluetooth", "tap-", "tunnel", "tailscale", "zerotier", "docker", "npcap",
+                  "vpn", "virtual")
+
+
+def list_interfaces():
+    """Every IPv4 interface as {name, ip, up, virtual}. Best-effort; [] on failure.
+    Lets the user pick the right NIC when auto-detection (the default-route trick) grabs
+    a VPN / virtual adapter instead of the real LAN one."""
+    out = []
+    try:
+        import psutil
+    except Exception:
+        return out
+    try:
+        stats = psutil.net_if_stats()
+    except Exception:
+        stats = {}
+    try:
+        for name, addrs in psutil.net_if_addrs().items():
+            st = stats.get(name)
+            up = bool(st.isup) if st is not None else True
+            low = name.lower()
+            virtual = any(h in low for h in _VIRTUAL_HINTS)
+            for a in addrs:
+                if getattr(a, "family", None) == socket.AF_INET:
+                    ip = a.address
+                    if ip and not ip.startswith("127."):
+                        out.append({"name": name, "ip": ip, "up": up, "virtual": virtual})
+    except Exception:
+        pass
+    return out
+
+
 def _hostname_ips():
     ips = []
     try:
@@ -72,13 +106,16 @@ def _public_ip(timeout):
     return None
 
 
-def get_ip_info(want_public=True, public_timeout=2.5):
+def get_ip_info(want_public=True, public_timeout=2.5, preferred_ip=None):
     """
     Returns a dict that ALWAYS succeeds:
       {
-        "local":  "<intranet/outbound IP or None>",
+        "local":  "<intranet IP to SHOW: user's pick, else auto>",
         "public": "<public IP or None>",
         "all":    [ ...every detected local IP... ],
+        "interfaces": [ {name, ip, up, virtual}, ... ],  # for the NIC picker
+        "auto":   "<the default-route auto pick>",
+        "preferred": "<the user's chosen IP or None>",
         "display":"<best single string to show, never blank>",
         "public_checked": bool,
       }
@@ -87,19 +124,35 @@ def get_ip_info(want_public=True, public_timeout=2.5):
         "local": None,
         "public": None,
         "all": [],
+        "interfaces": [],
+        "auto": None,
+        "preferred": preferred_ip or None,
         "display": "未能偵測",  # "unable to detect"
         "public_checked": False,
     }
 
     try:
-        local = _local_outbound_ip()
-        alt = _hostname_ips()
-        all_ips = []
-        for ip in ([local] if local else []) + alt:
-            if ip and ip not in all_ips:
-                all_ips.append(ip)
+        ifaces = list_interfaces()
+        info["interfaces"] = ifaces
+        outbound = _local_outbound_ip()
+        info["auto"] = outbound
+        all_ips = [i["ip"] for i in ifaces]
+        if not all_ips:   # psutil unavailable -> fall back to the old outbound + hostname trick
+            for ip in ([outbound] if outbound else []) + _hostname_ips():
+                if ip and ip not in all_ips:
+                    all_ips.append(ip)
         info["all"] = all_ips
-        info["local"] = local or (all_ips[0] if all_ips else None)
+        # Which local IP to SHOW: the user's pick (if that NIC is still present) wins;
+        # else the default-route auto pick; else the first up, non-virtual NIC; else first.
+        if preferred_ip and preferred_ip in all_ips:
+            info["local"] = preferred_ip
+        elif outbound and (not all_ips or outbound in all_ips):
+            info["local"] = outbound
+        elif ifaces:
+            up_phys = [i["ip"] for i in ifaces if i.get("up") and not i.get("virtual")]
+            info["local"] = up_phys[0] if up_phys else ifaces[0]["ip"]
+        elif all_ips:
+            info["local"] = all_ips[0]
     except Exception:
         pass
 

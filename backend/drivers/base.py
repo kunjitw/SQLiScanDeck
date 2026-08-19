@@ -155,6 +155,19 @@ _PP_CLEAN_RE = re.compile(r"parameter '([^']+)' does not seem to be injectable",
 # "was actually tested" oracle (sqlmap controller.py:604, ghauri ghauri.py:704).
 _PP_TESTED_RE = re.compile(r"testing for SQL injection on .*?parameter '([^']+)'", re.I)
 
+# sqlmap wraps a body param's name with the body-hint it detected: a multipart field
+# 'TypeChild' is reported as 'MULTIPART TypeChild', a JSON key 'id' as 'JSON id', etc.
+# Strip a KNOWN leading hint token so the reported name matches the user's bare selected
+# name. Exact leading-token match ONLY (never a substring), so a real param that merely
+# contains such a word is untouched.
+_HINT_PREFIXES = ("MULTIPART ", "JSON-like ", "JSON ", "XML ", "SOAP ", "ARRAY-LIKE ", "HEX ", "BASE64 ")
+def _strip_hint(name):
+    s = str(name or "").strip()
+    for pre in _HINT_PREFIXES:
+        if s.startswith(pre):
+            return s[len(pre):].strip()
+    return s
+
 # bonus non-SQLi heuristic findings sqlmap surfaces during a SQLi run
 _XSS_RE = re.compile(r"parameter '([^']+)' might be vulnerable to cross-site scripting", re.I)
 _FI_RE = re.compile(r"parameter '([^']+)' might be vulnerable to file inclusion", re.I)
@@ -376,7 +389,15 @@ def per_param_verdicts(log_text):
     for rx in _PP_CONFIRMED_RES:
         for m in rx.finditer(text):
             verdicts[m.group(1)] = "vulnerable"         # confirmation wins outright
-    return verdicts
+    # normalize sqlmap body-hint prefixes (MULTIPART/JSON/XML/...) to the bare param name,
+    # keeping the strongest verdict if two raw names collapse to the same bare name.
+    _rank = {"clean": 0, "tentative": 1, "vulnerable": 2}
+    out = {}
+    for k, v in verdicts.items():
+        bk = _strip_hint(k)
+        if bk not in out or _rank[v] > _rank[out[bk]]:
+            out[bk] = v
+    return out
 
 
 def extract_findings(log_text):
@@ -428,7 +449,7 @@ def extract_findings(log_text):
         if cuts:
             val = val[:min(cuts)]
         findings["dbms"] = val.strip(" '\".")
-    findings["parameters"] = [x.strip() for x in _PARAM_RE.findall(text)]
+    findings["parameters"] = [_strip_hint(x.strip()) for x in _PARAM_RE.findall(text)]  # strip body-hint; keep "(place)" suffix
     findings["types"] = [x.strip() for x in _TYPE_RE.findall(text)]
     findings["titles"] = [x.strip() for x in _TITLE_RE.findall(text)]
     findings["payloads"] = [x.strip() for x in _PAYLOAD_RE.findall(text)]
@@ -477,7 +498,7 @@ def extract_findings(log_text):
     findings["heuristic_sqli"] = sorted({m.group(1) for m in _HEUR_SQLI_RE.finditer(text)})
 
     findings["per_param"] = per_param_verdicts(text)
-    findings["tested"] = sorted({m.group(1) for m in _PP_TESTED_RE.finditer(text)})  # actually-fuzzed params
+    findings["tested"] = sorted({_strip_hint(m.group(1)) for m in _PP_TESTED_RE.finditer(text)})  # actually-fuzzed params (bare names)
     findings["heuristic_xss"] = sorted({m.group(1) for m in _XSS_RE.finditer(text)})
     findings["heuristic_fi"] = sorted({m.group(1) for m in _FI_RE.finditer(text)})
     findings["caveats"] = caveats(text)

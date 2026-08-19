@@ -592,15 +592,16 @@ def _param_outcomes(row):
         # NOT 無洞. The scan-level status is deliberately NOT used to infer per-param clean.
         if name in vuln or pv == "vulnerable":
             st = "vuln"
-        elif not reliable:
-            st = "unknown"                         # untrustworthy baseline -> 未測, never green
         elif pv == "tentative":
             st = "tentative"                       # unresolved tentative -> 疑似, never silently clean
         elif pv == "clean":
             st = "clean"                           # tool explicitly cleared THIS param
         else:
             st = "unknown"                         # selected but no per-param evidence -> 未測
-        out.append({"n": name, "st": st, "v": st == "vuln"})
+        # low-confidence: the tool DID judge this param but the baseline was untrustworthy
+        # (error storm / connection issue) -> show the real outcome + a ⚠, not a blank 未測.
+        lc = (not reliable) and st in ("clean", "tentative")
+        out.append({"n": name, "st": st, "v": st == "vuln", "lc": lc})
     # single-param inference: scan is vulnerable but the tool named no param (common with
     # ghauri) and exactly one param was tested -> that param is the injectable one.
     if scan_vuln and len(out) == 1 and out[0]["st"] != "vuln":

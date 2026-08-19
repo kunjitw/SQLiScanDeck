@@ -105,6 +105,7 @@ def api_ip():
     return ip_utils.get_ip_info(
         want_public=s.get("public_ip_lookup", True),
         public_timeout=s.get("public_ip_timeout", 2.5),
+        preferred_ip=s.get("preferred_local_ip", ""),
     )
 
 

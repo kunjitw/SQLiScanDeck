@@ -10,6 +10,7 @@ dependencies = [
     # backend web app
     "fastapi",
     "uvicorn",
+    "psutil",       # enumerate network interfaces so the user can pick which NIC's IP to show
     # ghauri is run FROM SOURCE (it is not on PyPI), but the backend launches it with
     # this same interpreter -- so ghauri's own runtime libraries must be importable here.
     # See backend/ghauri_launch.py, which lists exactly these. sqlmap needs none (it

@@ -957,18 +957,63 @@ function _revealFilledZones(gridSel) {
 
 // ===== IP / health ========================================================
 async function refreshIp() {
+  const pub = $("#ipPublic"), loc = $("#ipLocal");
+  // CLEAR first, then re-fetch, then write -- so a refresh is always VISIBLE and a
+  // failure shows "更新失敗" instead of silently keeping the last (possibly stale) value.
+  if (pub) { pub.textContent = "更新中…"; pub.classList.remove("unknown"); }
+  if (loc) { loc.textContent = "更新中…"; loc.classList.remove("unknown"); loc.title = ""; }
   try {
     const info = await api("/api/ip");
-    const pub = $("#ipPublic"), loc = $("#ipLocal");
-    pub.textContent = info.public || "—";
-    pub.classList.toggle("unknown", !info.public);
-    loc.textContent = info.local || "未能偵測";
-    loc.classList.toggle("unknown", !info.local);
-    if (info.all && info.all.length) loc.title = "所有網卡: " + info.all.join(", ");
+    state.ipInfo = info;
+    if (pub) { pub.textContent = info.public || "—"; pub.classList.toggle("unknown", !info.public); }
+    if (loc) {
+      loc.textContent = info.local || "未能偵測";
+      loc.classList.toggle("unknown", !info.local);
+      loc.title = "點擊選擇要顯示的網卡";
+    }
   } catch (e) {
-    $("#ipPublic").textContent = "—";
-    $("#ipLocal").textContent = "未能偵測"; $("#ipLocal").classList.add("unknown");
+    if (pub) { pub.textContent = "更新失敗"; pub.classList.add("unknown"); }
+    if (loc) { loc.textContent = "更新失敗"; loc.classList.add("unknown"); }
   }
+}
+// Click the 內網 IP -> pick which NIC's IP to show. Auto-detection follows the default
+// route, which can grab a VPN / virtual adapter on multi-NIC machines, so let the user
+// override it; the choice is remembered in settings (preferred_local_ip).
+function closeNicPicker() { const m = $("#nicMenu"); if (m) m.remove(); document.removeEventListener("mousedown", _nicOutside); }
+function _nicOutside(e) { const m = $("#nicMenu"); if (m && !m.contains(e.target) && e.target.id !== "ipLocal") closeNicPicker(); }
+function openNicPicker() {
+  if ($("#nicMenu")) { closeNicPicker(); return; }
+  const info = state.ipInfo || {};
+  const ifaces = info.interfaces || [];
+  const cur = info.preferred || "";
+  const row = (ip, name, tags, active) =>
+    `<div class="nic-row${active ? " active" : ""}${tags.includes("虛擬") ? " virtual" : ""}" data-ip="${esc(ip)}">`
+    + `<b>${esc(name)}</b><span class="nic-ip">${esc(ip || "—")}</span>`
+    + (tags.length ? `<span class="nic-tags">${esc(tags.join(" · "))}</span>` : "") + `</div>`;
+  const rows = [row("", "自動(依路由偵測)", info.auto ? ["目前 " + info.auto] : [], !cur)];
+  ifaces.forEach(i => {
+    const tags = [];
+    if (i.ip === info.auto) tags.push("自動");
+    if (i.virtual) tags.push("虛擬");
+    if (!i.up) tags.push("未啟用");
+    rows.push(row(i.ip, i.name, tags, cur === i.ip));
+  });
+  if (!ifaces.length) rows.push(`<div class="nic-empty">找不到網卡清單(需要 psutil;重跑一次 start.bat 會自動裝)</div>`);
+  const menu = document.createElement("div");
+  menu.className = "nic-menu"; menu.id = "nicMenu"; menu.innerHTML = rows.join("");
+  document.body.appendChild(menu);
+  const r = $("#ipLocal").getBoundingClientRect();
+  menu.style.left = Math.round(Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + "px";
+  menu.style.top = Math.round(r.bottom + 4) + "px";
+  $$(".nic-row", menu).forEach(el => el.onclick = async () => {
+    const ip = el.getAttribute("data-ip");
+    try {
+      await api("/api/settings", "POST", { preferred_local_ip: ip });
+      if (state.settings) state.settings.preferred_local_ip = ip;
+    } catch (e) { toast("儲存失敗:" + (e.message || e), "err"); }
+    closeNicPicker(); doIpRefresh();
+  });
+  setTimeout(() => document.addEventListener("mousedown", _nicOutside), 0);
 }
 function updateIpCountdown() { const el = $("#ipCountdown"); if (el) el.textContent = state.ipRemaining + "s"; }
 function doIpRefresh() { refreshIp(); state.ipRemaining = state.ipSeconds; updateIpCountdown(); }
@@ -2076,7 +2121,7 @@ function renderScanRow(s) {
   const canStop = s.status === "running" || s.status === "queued";
   const pouts = s.pouts || [];   // tested params (skipped omitted); v = has an injection point
   const pchips = pouts.length
-    ? `<div class="scan-row-params">${pouts.map(po => { const st = po.st || (po.v ? "vuln" : "unknown"); const m = { vuln: ["pv", "有注入點"], clean: ["pc", "無注入點"], tentative: ["pt", "疑似(待確認)"], unknown: ["pu", "未測(無此參數證據)"] }[st] || ["pu", "未測"]; return `<span class="pchip ${m[0]}" title="${esc(po.n)} · ${m[1]}">${esc(po.n)}</span>`; }).join("")}</div>`
+    ? `<div class="scan-row-params">${pouts.map(po => { const st = po.st || (po.v ? "vuln" : "unknown"); const m = { vuln: ["pv", "有注入點"], clean: ["pc", "無注入點"], tentative: ["pt", "疑似(待確認)"], unknown: ["pu", "未測(無此參數證據)"] }[st] || ["pu", "未測"]; return `<span class="pchip ${m[0]}" title="${esc(po.n)} · ${m[1]}${po.lc ? " · 低可信" : ""}">${esc(po.n)}${po.lc ? " ⚠" : ""}</span>`; }).join("")}</div>`
     : "";
   return `<div class="scan-row st-${st} ${s.id === state.detailId ? "active" : ""}${s.id === state.flashScanId ? " flash-target" : ""}" data-id="${s.id}">
     ${stateChip(s)}
@@ -2396,11 +2441,11 @@ function findingsHtml(s) {
 function _paramOutcome(p, f, scanVuln, scanDone) {
   if (!p.selected) return { label: "已略過", cls: "st-skip" };
   const pp = (f && f.per_param) || {};
-  const vulnNames = (f && f.parameters) || [];
-  if (vulnNames.indexOf(p.name) >= 0 || pp[p.name] === "vulnerable") return { label: "有漏洞", cls: "st-vuln" };
-  if (f && f.reliability_ok === false) return { label: "未測", cls: "st-untested" };  // 測不準:baseline 不可信,per-param clean 不採信
-  if (pp[p.name] === "clean") return { label: "無洞", cls: "st-clean" };            // tool said clean for THIS param
-  if (pp[p.name] === "tentative") return { label: "疑似", cls: "st-tent" };          // tool's tentative, unconfirmed
+  const vulnBare = ((f && f.parameters) || []).map(v => String(v).split(" (")[0]);   // "id (GET)" -> "id"
+  const lc = !!(f && f.reliability_ok === false);   // low-confidence baseline (error storm / conn issue)
+  if (vulnBare.indexOf(p.name) >= 0 || pp[p.name] === "vulnerable") return { label: "有漏洞", cls: "st-vuln" };
+  if (pp[p.name] === "clean") return { label: "無洞", cls: "st-clean", lc };        // tool cleared THIS param (⚠ if lc)
+  if (pp[p.name] === "tentative") return { label: "疑似", cls: "st-tent", lc };      // tool's tentative, unconfirmed
   // No per-param evidence NAMED this param -> 未測, never a groundless 無洞. Covers a
   // param the tool skipped (cookie at --level 1), the URI '#1*' fallback, and any
   // errored/half-run scan. The scan-level status is deliberately NOT used to infer clean.
@@ -2454,12 +2499,13 @@ function _paramsVerdictHtml(s) {
   const body = rows.map(({ p, oc }) => {
     let evidence;
     if (oc.cls === "st-vuln") evidence = ev ? "命中 " + ev : "偵測到注入點";
-    else if (oc.cls === "st-clean") evidence = "無注入點";
+    else if (oc.cls === "st-clean") evidence = oc.lc ? "無注入點(此結果可信度低,詳見上方判定)" : "無注入點";
     else if (oc.cls === "st-tent") evidence = "工具暫定疑似,尚未確認";
     else if (oc.cls === "st-skip") evidence = "未勾選,本次未測試";
     else if (oc.cls === "st-untested") evidence = "工具日誌未提及此參數,未取得證據(非無洞)";
     else evidence = "無定論";
-    return `<div class="pv-row ${oc.cls}"><span class="state-chip ${oc.cls}">${oc.label}</span>`
+    const chipLabel = oc.label + (oc.lc ? " ⚠" : "");
+    return `<div class="pv-row ${oc.cls}"><span class="state-chip ${oc.cls}">${chipLabel}</span>`
       + `<span class="pv-name">${esc(p.name)}</span><span class="loc-chip">${esc(p.location || "?")}</span>`
       + `<span class="pv-val" title="${esc(p.value || "")}">${esc(p.value || "")}</span>`
       + `<span class="pv-ev">${esc(evidence)}</span></div>`;
@@ -3376,6 +3422,7 @@ function init() {
   $("#toggleLeftBtn").onclick = () => togglePanel("left");
   $("#toggleRightBtn").onclick = () => togglePanel("right");
   $("#ipRefreshBtn").onclick = doIpRefresh;
+  { const _il = $("#ipLocal"); if (_il) { _il.classList.add("nic-clickable"); _il.onclick = openNicPicker; } }
   setupResizer("#resizerLeft", "#scanSidebar", "left", "panelLeftW");
   setupResizer("#resizerRight", "#treePanel", "right", "panelRightW");
   syncPanels();

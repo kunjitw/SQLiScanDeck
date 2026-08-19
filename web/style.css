@@ -743,6 +743,19 @@ table tr:last-child td { border-bottom: none; }
 /* advisory ⚠ on a 無洞 result whose reliability/coverage is low -- extra reference only,
    never a verdict. Amber, hover for the reason. */
 .caveat-flag { color: var(--warn); font-weight: 700; cursor: help; }
+/* NIC picker: click the 內網 IP to choose which adapter's IP to show */
+.nic-clickable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.nic-menu { position: fixed; z-index: 2000; min-width: 240px; max-width: 380px; max-height: 60vh; overflow: auto;
+  background: var(--bg-elev, var(--bg-soft, #1c1c1e)); border: 1px solid var(--border-strong, #444);
+  border-radius: var(--radius-sm, 6px); box-shadow: 0 8px 24px rgba(0,0,0,.35); padding: 4px; }
+.nic-row { display: flex; align-items: baseline; gap: .5rem; padding: .35rem .5rem; border-radius: 4px; cursor: pointer; }
+.nic-row:hover { background: var(--bg-soft, rgba(255,255,255,.06)); }
+.nic-row.active { outline: 1px solid var(--accent, #4f8cff); outline-offset: -1px; }
+.nic-row b { font-size: .82rem; font-weight: 600; }
+.nic-row .nic-ip { font-family: monospace; margin-left: auto; }
+.nic-row.virtual { opacity: .65; }
+.nic-row .nic-tags { color: var(--fg-dim, #888); font-size: .72rem; white-space: nowrap; }
+.nic-empty { padding: .4rem .5rem; color: var(--fg-dim, #888); font-size: .78rem; }
 .state-chip.st-tent { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
 .state-chip.st-skip { color: var(--fg-dim); background: transparent; border-color: var(--border); min-width: 0; }
 /* verdict headline: the single conclusion */

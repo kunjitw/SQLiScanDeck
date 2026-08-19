@@ -91,6 +91,7 @@ DEFAULTS = {
     "public_ip_lookup": True, # try to also show the public IP (best-effort)
     "public_ip_timeout": 2.5, # seconds; failure is non-fatal
     "ip_refresh_seconds": 60,  # how often the UI auto-refreshes the IP display
+    "preferred_local_ip": "",  # user-picked NIC IP to show as 內網 (empty = auto-detect by route)
     "scan_refresh_seconds": 2, # how often the board/tree/log poll for updates
     "auto_open_browser": True,
     "default_tool": "sqlmap", # which tool the composer pre-selects (sqlmap | ghauri)
