@@ -12,6 +12,7 @@ import subprocess
 import threading
 
 import config
+import proc_guard
 from drivers import base
 
 TOOL = "ghauri"
@@ -183,6 +184,7 @@ def run(ctx):
         return
 
     ctx.engine_proc = proc
+    proc_guard.assign(proc.pid)   # so a HARD-killed backend takes this scanner down with it
     q = queue.Queue()
     reader = threading.Thread(target=_pump, args=(proc.stdout, q), daemon=True)
     reader.start()
