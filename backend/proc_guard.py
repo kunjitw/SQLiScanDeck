@@ -15,8 +15,10 @@ All calls are best-effort: any failure just means we fall back to the previous b
 (graceful-only cleanup), never an error to the caller.
 """
 import sys
+import threading
 
 _JOB = None                # the job handle (int), False = tried-and-unavailable, None = untried
+_LOCK = threading.Lock()   # guards the one-time lazy init of _JOB (assign() runs on many threads)
 _KILL_ON_JOB_CLOSE = 0x2000
 _JobObjectExtendedLimitInformation = 9
 
@@ -42,19 +44,28 @@ def _k32():
 
 
 def _job():
-    """The process-wide kill-on-close Job Object handle, or None if unavailable."""
+    """The process-wide kill-on-close Job Object handle, or None if unavailable.
+    Double-checked locking: concurrent first-callers (ThreadPoolExecutor workers) must not
+    each CreateJobObject (handle leak), and a failure result must not clobber a published one."""
     global _JOB
-    if _JOB is not None:
+    if _JOB is not None:                 # fast path once initialized (handle or False)
         return _JOB or None
+    with _LOCK:
+        if _JOB is None:                 # first thread in creates it; the rest see the result
+            _JOB = _create_job()
+        return _JOB or None
+
+
+def _create_job():
+    """Create the kill-on-close job ONCE (called under _LOCK). Returns the handle, or False
+    if unavailable (non-Windows, or any Win32 failure)."""
     if not sys.platform.startswith("win"):
-        _JOB = False
-        return None
+        return False
     try:
         k, ctypes, wintypes = _k32()
         job = k.CreateJobObjectW(None, None)
         if not job:
-            _JOB = False
-            return None
+            return False
 
         class BASIC(ctypes.Structure):
             _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
@@ -87,13 +98,10 @@ def _job():
         if not k.SetInformationJobObject(job, _JobObjectExtendedLimitInformation,
                                          ctypes.byref(info), ctypes.sizeof(info)):
             k.CloseHandle(job)
-            _JOB = False
-            return None
-        _JOB = job          # held for the process lifetime -- do NOT CloseHandle it
-        return job
+            return False
+        return job          # held for the process lifetime -- do NOT CloseHandle it
     except Exception:
-        _JOB = False
-        return None
+        return False
 
 
 def assign(pid):
