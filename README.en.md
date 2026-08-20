@@ -16,6 +16,7 @@ Requirements: Windows 10/11. The first launch needs internet. It never touches y
 
 - **Fully self-contained**: everything lives in the folder. It never changes your system or PATH. Delete the folder = zero residue.
 - **Move to another machine**: copy the whole folder (including `uv.lock`); `start.bat` restores the exact same environment from the lock. Scan history and tabs live in `data/`, so they move with the folder.
+- **Update to the latest version**: double-click `update.bat` (**no git, no reinstall**; it swaps only the code and keeps your `data/` scan history + settings).
 - **Intranet / no GitHub access**: see "Manual install" below.
 
 ## Try it
